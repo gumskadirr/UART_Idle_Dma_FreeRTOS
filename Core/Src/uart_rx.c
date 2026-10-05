@@ -639,7 +639,7 @@ void uart_rx_service(void)
            butceyi uzatmaz. FAULT: otomatik yeniden deneme yok. */
     }
 
-    if (s_recover_pending != 0U)
+    if ((s_recover_pending != 0U) || (s_recover_request != 0U))
     {
         rx_recover_step();
     }
@@ -1026,6 +1026,7 @@ uint8_t uart_rx_request_recovery(void)
     }
 
     s_recover_request = 1U;
+    s_recover_pending = 1U;   /* servis turunun toparlanma adimini acar */
     return 1U;          /* istegin KAYDI; basarili toparlanma DEGIL */
 }
 
@@ -1541,9 +1542,12 @@ void uart_rx_on_uart_irq_exit(void)
        FAULT/ABORTING/RETRY_WAIT sirasinda her ilgisiz TX TC kesmesinde
        yeni bir RX hata donemi acilmasi, butceyi sonsuza kadar tazeler ve
        FAULT'a ulasmayi engellerdi. */
-    if ((s_phase != UART_RX_PHASE_RUNNING) &&
-        (s_phase != UART_RX_PHASE_STARTING))
+    if (s_phase != UART_RX_PHASE_RUNNING)
     {
+        /* STARTING bilerek DISARIDA: oturum kurulurken DMAR/EN henuz set
+           olmayabilir ve o pencerede gelen bir TX TC kesmesi SAHTE saglik
+           hatasi uretirdi. STARTING'in sagligini zaten owner kendisi
+           rx_session_healthy() ile dogruluyor. */
         return;
     }
 
