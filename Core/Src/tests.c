@@ -14,6 +14,13 @@
 #include "uart_rx.h"
 #include "uart_tx.h"
 
+/* P0: butun dogrulama kosucusu UART_COMM_TEST ile sinirlidir. Uretim
+   derlemesinde bu cevirim birimi bos kalir; test sayaclari, hata enjeksiyon
+   kancalari ve loopback kodu BINARY'E HIC GIRMEZ. Boylece "uretimde
+   cagrilmiyor" niyeti yerine derleyici garantisi gecerli olur.
+   Test derlemesi: tools/build.sh test   (-DUART_COMM_TEST) */
+#ifdef UART_COMM_TEST
+
 /* Sonuclar debugger'da okunur. Dis baglantili (static degil) olmalari
    derleyicinin bunlari atmasini engeller. */
 uint8_t  test_sonuc[TEST_SONUC_ADET];
@@ -22,12 +29,27 @@ uint8_t  test_gecen;
 uint8_t  test_kalan;
 uint16_t test_beklenen;
 uint16_t test_bulunan;
+uint8_t  test_sayim_dogru;
 
 /* Loopback (donanim) testleri icin ayri sayaclar */
 uint8_t  lb_sonuc[LB_SONUC_ADET];
+uint8_t  lb_kaynak[LB_SONUC_ADET];
 uint8_t  lb_sayisi;
 uint8_t  lb_gecen;
 uint8_t  lb_kalan;
+uint8_t  lb_calismayan;
+uint8_t  lb_iptal_adim;
+uint8_t  lb_iptal_nedeni;
+
+/* Onkosul dustugunde kosucuyu GORUNUR bicimde sonlandirir.
+   lb_iptal_adim = lb_sayisi: iptal aninda sirada olan testin indeksi, yani
+   "buraya kadar kostu" bilgisi. Elle indeks yazmaya gerek yok, kayma olmaz. */
+#define LB_IPTAL(neden)                     \
+  do {                                      \
+    lb_iptal_nedeni = (uint8_t)(neden);     \
+    lb_iptal_adim   = lb_sayisi;            \
+    goto bitir;                             \
+  } while (0)
 
 /* T6 uart_rx_start cagirdigi icin ayristirici sayaclari sifirlanir;
    T6 oncesindeki degerler debugger'da gorunsun diye burada saklanir. */
@@ -338,10 +360,15 @@ void birim_testleri_kosur(void)
   test_sayisi = 0U;
   test_gecen  = 0U;
   test_kalan  = 0U;
+  test_sayim_dogru = 0U;
 
   crc16_testleri_kosur();
   paket_testleri_kosur();
   frame_parser_testleri_kosur();
+
+  /* "test_kalan == 0" tek basina yetmez: bir test grubu hic cagrilmazsa da
+     sifirdir. Beklenen sayida testin GERCEKTEN kostugu ayrica dogrulanir. */
+  test_sayim_dogru = (uint8_t)(test_sayisi == TEST_BEKLENEN_ADET);
 }
 
 
@@ -436,34 +463,43 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   uart_tx_status_t st1;
   uart_tx_status_t st2;
 
-  lb_sayisi = 0U;
-  lb_gecen  = 0U;
-  lb_kalan  = 0U;
+  lb_sayisi       = 0U;
+  lb_gecen        = 0U;
+  lb_kalan        = 0U;
+  lb_calismayan   = LB_BEKLENEN_ADET;   /* kosana kadar hepsi NOT_RUN */
+  lb_iptal_adim   = 0xFFU;
+  lb_iptal_nedeni = LB_IPTAL_YOK;
+  (void)memset(lb_sonuc,  0, sizeof(lb_sonuc));    /* 0 = NOT_RUN */
+  (void)memset(lb_kaynak, LB_KAYNAK_YAZILIM, sizeof(lb_kaynak));
 
   if (huart == NULL)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_HUART_NULL);
   }
 
   /* TX modulu T4'ten itibaren kullaniliyor. main.c de init ediyor ama test
      ondan bagimsiz kosabilmeli. Durum IDLE iken tekrar cagirmak zararsiz. */
   if (uart_tx_init(huart) != HAL_OK)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_TX_INIT);
   }
 
   /* ---------------- T1: tek cerceve ----------------
      X = +1000, Y = -500, SEQUENCE = 1
      Beklenen 13 bayt: AA 55 01 10 04 01 00 E8 03 0C FE 46 59 */
+  /* Mutlak degil DELTA olcum: ileride yeniden baslatma istatistikleri
+     korunacagi icin "frames_ok == 1" varsayimi kirilgandir (P0). */
+  ok_once = uart_rx_get_parser()->frames_ok;
+
   n = frame_build_joystick(tx, (uint8_t)sizeof(tx), 1000, -500, 1U);
   if (n == 0U)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_FRAME_BUILD);
   }
 
   if (HAL_UART_Transmit(huart, tx, n, 100U) != HAL_OK)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_HAL_TRANSMIT);
   }
 
   /* uart_rx_drain() DEGIL uart_rx_service(): boylece
@@ -472,7 +508,8 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   HAL_Delay(1U);
   uart_rx_service();
 
-  lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok == 1U) &&
+  lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok ==
+                            (uint16_t)(ok_once + 1U)) &&
                            (uart_rx_state.last_seq == 1U) &&
                            (uart_rx_state.joy_x == 1000) &&
                            (uart_rx_state.joy_y == -500)));
@@ -489,19 +526,20 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
     n = frame_build_joystick(tx, (uint8_t)sizeof(tx), 1000, -500, sira);
     if (n == 0U)
     {
-      return;
+      LB_IPTAL(LB_IPTAL_FRAME_BUILD);
     }
 
     if (HAL_UART_Transmit(huart, tx, n, 100U) != HAL_OK)
     {
-      return;
+      LB_IPTAL(LB_IPTAL_HAL_TRANSMIT);
     }
 
     HAL_Delay(1U);
     uart_rx_service();
   }
 
-  lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok == 40U) &&
+  lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok ==
+                            (uint16_t)(ok_once + 40U)) &&
                            (uart_rx_state.last_seq == 40U) &&
                            (uart_rx_state.next_seq == 41U) &&
                            (uart_rx_state.seq_gaps == 0U) &&
@@ -518,7 +556,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   if (HAL_UART_Transmit(huart, t3_baslik,
                         (uint16_t)sizeof(t3_baslik), 100U) != HAL_OK)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_HAL_TRANSMIT);
   }
 
   HAL_Delay(1U);
@@ -560,7 +598,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
                   payload, FRAME_MAX_PAYLOAD);
   if (n != FRAME_MAX_SIZE)                   /* 64 bayt beklenir */
   {
-    return;
+    LB_IPTAL(LB_IPTAL_FRAME_BUILD);
   }
 
   ok_once = uart_rx_get_parser()->frames_ok;
@@ -568,7 +606,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
 
   if (HAL_UART_Transmit(huart, tx, FRAME_HEADER_SIZE, 100U) != HAL_OK)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_HAL_TRANSMIT);
   }
 
   HAL_Delay(1U);
@@ -580,7 +618,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   if (uart_tx_send_copy(&tx[FRAME_HEADER_SIZE],
                         (uint8_t)(n - FRAME_HEADER_SIZE)) != UART_TX_OK)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_TX_SEND_COPY);
   }
 
   /* Teslim olana kadar (veya 30 ms) service dondur */
@@ -611,21 +649,23 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   HAL_Delay(2U);
   uart_rx_service();
 
+  lb_kaynak[lb_sayisi] = LB_KAYNAK_FIZIKSEL;   /* gercek FE, enjeksiyon degil */
   lb_kaydet_bool((uint8_t)((uart_rx_stats.error_events > err_once) &&
                            ((uart_rx_stats.last_error &
                              HAL_UART_ERROR_FE) != 0U)));
 
   /* ASIL IDDIA: hatadan sonra alim hala calisiyor. Break'in tampona
      dusurdugu bayt SYNC0 olmadigi icin elenir. */
+  lb_kaynak[lb_sayisi] = LB_KAYNAK_FIZIKSEL;
   n = frame_build_joystick(tx, (uint8_t)sizeof(tx), -250, 750, 42U);
   if (n == 0U)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_FRAME_BUILD);
   }
 
   if (HAL_UART_Transmit(huart, tx, n, 100U) != HAL_OK)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_HAL_TRANSMIT);
   }
 
   HAL_Delay(2U);
@@ -659,6 +699,9 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
 
   uart_rx_force_restart_fail(0U);
 
+  /* Bu sonuc KONTROLLU HATA ENJEKSIYONU ile uretildi: yazilim mantigini
+     dogrular, donanimin gercek toparlanma davranisini DEGIL. */
+  lb_kaynak[lb_sayisi] = LB_KAYNAK_ENJEKTE;
   lb_kaydet_bool((uint8_t)((uart_rx_stats.restart_fails ==
                             (uint16_t)(rf_once +
                                        UART_RX_RESTART_MAX_TRIES)) &&
@@ -675,27 +718,35 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   /* Kalici hatadan tek cikis: yeniden kurmak */
   if (uart_rx_start(huart) != HAL_OK)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_RX_START);
   }
 
+  lb_kaynak[lb_sayisi] = LB_KAYNAK_ENJEKTE;
   lb_kaydet_bool((uint8_t)(uart_rx_stats.faulted == 0U));
 
-  /* Alim gercekten geri geldi mi (ayristirici sifirlandi: frames_ok 1) */
+  /* Yeniden kurulan alim icin YENI delta tabani: uart_rx_start ayristiriciyi
+     sifirliyor ama ileride (R1/R2) sifirlamayacak. Mutlak "frames_ok == 1"
+     yerine bu tabana gore olculur. */
+  ok_once = uart_rx_get_parser()->frames_ok;
+
+  /* Alim gercekten geri geldi mi: bir cerceve daha cozulmeli (delta) */
   n = frame_build_joystick(tx, (uint8_t)sizeof(tx), 12, -34, 43U);
   if (n == 0U)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_FRAME_BUILD);
   }
 
   if (HAL_UART_Transmit(huart, tx, n, 100U) != HAL_OK)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_HAL_TRANSMIT);
   }
 
   HAL_Delay(2U);
   uart_rx_service();
 
-  lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok == 1U) &&
+  lb_kaynak[lb_sayisi] = LB_KAYNAK_ENJEKTE;
+  lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok ==
+                            (uint16_t)(ok_once + 1U)) &&
                            (uart_rx_state.last_seq == 43U) &&
                            (uart_rx_state.joy_x == 12) &&
                            (uart_rx_state.joy_y == -34)));
@@ -715,7 +766,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   n = frame_build_joystick(tx, (uint8_t)sizeof(tx), 1000, -500, 44U);
   if (n == 0U)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_FRAME_BUILD);
   }
 
   st1 = uart_tx_send_copy(tx, n);
@@ -757,7 +808,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   n2 = frame_build_joystick(tx2, (uint8_t)sizeof(tx2),  99,  -99, 46U);
   if ((n == 0U) || (n2 == 0U))
   {
-    return;
+    LB_IPTAL(LB_IPTAL_FRAME_BUILD);
   }
 
   st1 = uart_tx_send_copy(tx,  n);     /* kabul edilmeli */
@@ -795,7 +846,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   n = frame_build_joystick(tx, (uint8_t)sizeof(tx), -1234, 4321, 46U);
   if (n == 0U)
   {
-    return;
+    LB_IPTAL(LB_IPTAL_FRAME_BUILD);
   }
 
   st1 = uart_tx_send_copy(tx, n);
@@ -812,4 +863,14 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
                            (uart_rx_state.last_seq == 46U) &&
                            (uart_rx_state.joy_x == -1234) &&
                            (uart_rx_state.joy_y == 4321)));
+
+bitir:
+  /* Normal bitiste de, LB_IPTAL ile erken cikista da buraya gelinir.
+     Kosmayan testler lb_sonuc[] icinde 0 (NOT_RUN) kalir ve burada sayilir;
+     boylece "lb_kalan == 0" artik tek basina basari olarak okunamaz. */
+  lb_calismayan = (uint8_t)((lb_sayisi < LB_BEKLENEN_ADET)
+                            ? (LB_BEKLENEN_ADET - lb_sayisi)
+                            : 0U);
 }
+
+#endif /* UART_COMM_TEST */

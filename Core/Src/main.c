@@ -24,6 +24,7 @@
 #include "uart_rx.h"
 #include "uart_tx.h"
 #include "tests.h"
+#include "uart_comm_tests.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -96,8 +97,10 @@ int main(void)
   MX_DMA_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  /* Donanim gerektirmeyen 27 birim testi. Uretimde kaldirilabilir. */
+#ifdef UART_COMM_TEST
+  /* Donanim gerektirmeyen 29 birim testi (TEST_BEKLENEN_ADET). */
   birim_testleri_kosur();
+#endif
 
   /* Alimi baslat: ayristirici ve okuma konumu sifirlanir, circular DMA
      IDLE olaylariyla kurulur. Loopback gonderiminden ONCE olmali. */
@@ -108,8 +111,16 @@ int main(void)
   if ((uart_tx_init(&huart2)) != HAL_OK){
       Error_Handler();
     }
-  /* PA2-PA3 jumper gerektirir. Uretimde kaldirilabilir. */
+#ifdef UART_COMM_TEST
+  /* PA2-PA3 jumper gerektirir. Uretim derlemesinde HIC derlenmez. */
   loopback_testi_kosur(&huart2);
+
+  /* Adim bazli kosucu (P0..M2). Sonuclar debugger'da:
+       uart_comm_test_sayisi / _gecen / _kalan / _kosmayan / _atlanan
+       uart_comm_test_kayit[i].id ve .result
+     Kabul olcutu TEK ifade: uart_comm_tests_ok() == 1 */
+  uart_comm_tests_run();
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */

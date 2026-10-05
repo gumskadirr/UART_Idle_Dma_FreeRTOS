@@ -33,7 +33,9 @@ static uint32_t            s_last_rx_tick;           /* son bayt geldigi an */
 static uint8_t             s_recover_pending;
 static uint8_t             s_restart_tries;          /* ust uste basarisizlik */
 static uint32_t            s_restart_tick;           /* son deneme ani */
+#ifdef UART_COMM_TEST
 static uint8_t             s_force_restart_fail;     /* yalnizca test kancasi */
+#endif
 
 uart_rx_stats_t uart_rx_stats;
 uart_rx_state_t uart_rx_state;
@@ -119,6 +121,7 @@ static void uart_rx_recover(void)
         return;
     }
 
+#ifdef UART_COMM_TEST
     /* TEST KANCASI: donanima hic dokunmadan basarisiz deneme uretir.
        BUSY_RX kontrolunden ONCE olmali, cunku testte alim calismaya devam
        ediyor; amac tekrar/kalici hata mantigini sinamak. */
@@ -127,6 +130,7 @@ static void uart_rx_recover(void)
         restart_failed();
         return;
     }
+#endif /* UART_COMM_TEST */
 
     if (s_huart->RxState == HAL_UART_STATE_BUSY_RX)
     {
@@ -306,6 +310,7 @@ const frame_parser_t *uart_rx_get_parser(void)
 
 
 /* --- Test kancalari (bkz. uart_rx.h) --- */
+#ifdef UART_COMM_TEST
 
 void uart_rx_force_restart_fail(uint8_t enable)
 {
@@ -317,6 +322,8 @@ void uart_rx_test_inject_error(void)
 {
     s_rx_error = 1U;
 }
+
+#endif /* UART_COMM_TEST */
 
 
 /* Dogrulanmis bir cerceve cozuldugunde frame_parser_feed tarafindan cagrilir.

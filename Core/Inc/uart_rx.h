@@ -92,15 +92,21 @@ void uart_rx_drain(void);
 const frame_parser_t *uart_rx_get_parser(void);
 
 /* --- Test kancalari ---
+   UART_COMM_TEST ile sinirli (P0): uretim derlemesinde bu prototipler ve
+   uygulamalari HIC derlenmez, boylece "enable her zaman 0" niyetine degil
+   derleyiciye dayanilir. Test derlemesi: tools/build.sh test
    Donanimda "yeniden baslatma basarisiz oldu" durumunu deterministik uretmenin
    temiz bir yolu yok: gercek bir ORE'nin restart'i dusurup dusurmeyecegi
    garanti edilemez. Tekrar deneme ve kalici hata durumu (T6) ancak bu kanca
-   ile sinanabilir. Uretim akisinda hicbiri cagrilmaz; enable her zaman 0. */
+   ile sinanabilir. */
+#ifdef UART_COMM_TEST
 
 /* Her yeniden baslatma denemesini basarisiz saydirir. */
 void uart_rx_force_restart_fail(uint8_t enable);
 
 /* Kesmeden gelmis gibi bir hata bildirimi enjekte eder. */
 void uart_rx_test_inject_error(void);
+
+#endif /* UART_COMM_TEST */
 
 #endif /* INC_UART_RX_H_ */
