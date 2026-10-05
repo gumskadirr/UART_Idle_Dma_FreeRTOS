@@ -15,6 +15,7 @@
 
 #include "tests.h"
 #include "uart_rx.h"
+#include "app_protocol.h"
 #include "uart_tx.h"
 #include "frame.h"
 #include "parser.h"
@@ -369,8 +370,8 @@ static uint8_t r1_start_busy_durumu_korur(UART_HandleTypeDef *huart)
     aday_len      = uart_rx_get_parser()->len;
     ok_once       = uart_rx_get_parser()->frames_ok;
     drop_once     = uart_rx_get_parser()->bytes_dropped;
-    gaps_once     = uart_rx_state.seq_gaps;
-    seq_once      = uart_rx_state.last_seq;
+    gaps_once     = app_proto_state.seq_gap_events;
+    seq_once      = app_proto_state.last_seq;
     restarts_once = uart_rx_stats.restarts;
 
     if (aday_len != FRAME_HEADER_SIZE)
@@ -389,8 +390,8 @@ static uint8_t r1_start_busy_durumu_korur(UART_HandleTypeDef *huart)
     if ((uart_rx_get_parser()->len           != aday_len)  ||
         (uart_rx_get_parser()->frames_ok     != ok_once)   ||
         (uart_rx_get_parser()->bytes_dropped != drop_once) ||
-        (uart_rx_state.seq_gaps  != gaps_once) ||
-        (uart_rx_state.last_seq  != seq_once)  ||
+        (app_proto_state.seq_gap_events  != gaps_once) ||
+        (app_proto_state.last_seq  != seq_once)  ||
         (uart_rx_stats.restarts  != restarts_once) ||
         (uart_rx_get_phase()     != UART_RX_PHASE_RUNNING))
     {
@@ -408,9 +409,9 @@ static uint8_t r1_start_busy_durumu_korur(UART_HandleTypeDef *huart)
 
     return (uint8_t)((uart_rx_get_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
-                     (uart_rx_state.last_seq == 601U) &&
-                     (uart_rx_state.joy_x == 321) &&
-                     (uart_rx_state.joy_y == -321) &&
+                     (app_proto_state.last_seq == 601U) &&
+                     (app_proto_state.joy_x == 321) &&
+                     (app_proto_state.joy_y == -321) &&
                      (uart_rx_get_parser()->bytes_dropped == drop_once));
 }
 
@@ -457,7 +458,7 @@ static uint8_t r1_baska_handle_reddedilir(UART_HandleTypeDef *huart)
 
     return (uint8_t)((uart_rx_get_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
-                     (uart_rx_state.last_seq == 602U) &&
+                     (app_proto_state.last_seq == 602U) &&
                      (uart_rx_get_phase() == UART_RX_PHASE_RUNNING));
 }
 
@@ -1127,7 +1128,7 @@ static uint8_t r3_kopya_sirasinda_ezilme(UART_HandleTypeDef *huart)
 
     return (uint8_t)((uart_rx_get_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
-                     (uart_rx_state.last_seq == 802U));
+                     (app_proto_state.last_seq == 802U));
 }
 
 
@@ -1188,7 +1189,7 @@ static uint8_t r3_kopya_sonrasi_ornek_dustu(UART_HandleTypeDef *huart)
     (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
 
     if ((uart_rx_get_parser()->frames_ok != (uint16_t)(ok_once + 1U)) ||
-        (uart_rx_state.last_seq != 803U))
+        (app_proto_state.last_seq != 803U))
     {
         sonuc = 0U;
     }
@@ -1258,8 +1259,8 @@ static uint8_t r3_tasma_sonrasi_senkron(UART_HandleTypeDef *huart)
 
     return (uint8_t)((uart_rx_get_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
-                     (uart_rx_state.last_seq == 805U) &&
-                     (uart_rx_state.joy_x == 2));
+                     (app_proto_state.last_seq == 805U) &&
+                     (app_proto_state.joy_x == 2));
 }
 
 
@@ -1315,7 +1316,7 @@ static uint8_t r4_fe_sonrasi_toparlanma(UART_HandleTypeDef *huart)
 
     return (uint8_t)((uart_rx_get_parser()->frames_ok >
                       ok_once) &&
-                     (uart_rx_state.last_seq == 901U));
+                     (app_proto_state.last_seq == 901U));
 }
 
 
@@ -1638,6 +1639,368 @@ static uint8_t r4_running_disi_tuketim_yok(UART_HandleTypeDef *huart)
 }
 
 
+/* ==================== R5: zaman asimi, handler, kapanis ================ */
+
+/* RX_TIMEOUT_QUIET
+   Yarim baslik + 50 ms ilerlemesizlik: aday dusurulmeli. */
+static uint8_t r5_sessizlikte_zaman_asimi(UART_HandleTypeDef *huart)
+{
+    static const uint8_t bozuk[FRAME_HEADER_SIZE] =
+        { 0xAA, 0x55, 0x01, 0x20, 0x37, 0x01, 0x00 };   /* LENGTH=55 der */
+    uint16_t to_once;
+    uint32_t t0;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+    to_once = uart_rx_stats.frame_timeouts;
+
+    if (HAL_UART_Transmit(huart, bozuk, (uint16_t)sizeof(bozuk),
+                          100U) != HAL_OK)
+    {
+        return 0U;
+    }
+    HAL_Delay(2U);
+    uart_rx_service();
+
+    if (uart_rx_get_parser()->len != FRAME_HEADER_SIZE)
+    {
+        return 0U;                   /* onkosul: aday tikanmis olmali */
+    }
+
+    /* Son tarih ETKIN olmali: suresiz uyku bildirilmemeli */
+    if (uart_rx_next_wait_ms(HAL_GetTick()) == UINT32_MAX)
+    {
+        return 0U;
+    }
+
+    t0 = HAL_GetTick();
+    while (((HAL_GetTick() - t0) < 120U) &&
+           (uart_rx_stats.frame_timeouts == to_once))
+    {
+        uart_rx_service();
+    }
+
+    return (uint8_t)((uart_rx_stats.frame_timeouts ==
+                      (uint16_t)(to_once + 1U)) &&
+                     (uart_rx_get_parser()->len == 0U));
+}
+
+
+/* RX_TIMEOUT_CONTINUATION
+   50 ms siniri AKMAKTA OLAN gecerli bir cercevenin ortasina dustugunde
+   cerceve DUSMEMELI. Devam yayini TX DMA ile gonderiliyor ki servis
+   dongusu serbest kalsin; bloklayan Transmit ile bu hata gorunmez olurdu. */
+static uint8_t r5_devam_eden_cerceve_dusmez(UART_HandleTypeDef *huart)
+{
+    uint8_t  cerceve[FRAME_MAX_SIZE];
+    uint8_t  payload[FRAME_MAX_PAYLOAD];
+    uint16_t i;
+    uint8_t  n;
+    uint16_t to_once;
+    uint16_t ok_once;
+    uint32_t t0;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < FRAME_MAX_PAYLOAD; i++)
+    {
+        payload[i] = (uint8_t)i;
+    }
+
+    n = frame_build(cerceve, (uint8_t)sizeof(cerceve), FRAME_TYPE_SET_OUTPUT,
+                    970U, payload, FRAME_MAX_PAYLOAD);
+    if (n != FRAME_MAX_SIZE)
+    {
+        return 0U;
+    }
+
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+    to_once = uart_rx_stats.frame_timeouts;
+    ok_once = uart_rx_get_parser()->frames_ok;
+
+    /* Once baslik: aday olusur ve pencere baslar */
+    if (HAL_UART_Transmit(huart, cerceve, FRAME_HEADER_SIZE, 100U) != HAL_OK)
+    {
+        return 0U;
+    }
+    HAL_Delay(2U);
+    uart_rx_service();
+
+    /* Sessizce sinira yaklas */
+    t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < (UART_RX_FRAME_TIMEOUT_MS - 3U))
+    {
+        uart_rx_service();
+    }
+
+    /* 57 bayt ~4,95 ms surer: 50 ms siniri yayinin ORTASINA duser */
+    if (uart_tx_send_copy(&cerceve[FRAME_HEADER_SIZE],
+                          (uint16_t)(n - FRAME_HEADER_SIZE)) != UART_TX_OK)
+    {
+        return 0U;
+    }
+
+    t0 = HAL_GetTick();
+    while (((HAL_GetTick() - t0) < 60U) &&
+           (uart_rx_get_parser()->frames_ok == ok_once))
+    {
+        uart_tx_service();
+        uart_rx_service();
+    }
+
+    return (uint8_t)((uart_rx_get_parser()->frames_ok ==
+                      (uint16_t)(ok_once + 1U)) &&
+                     (uart_rx_stats.frame_timeouts == to_once) &&
+                     (app_proto_state.last_seq == 970U));
+}
+
+
+/* RX_TIMEOUT_NO_CANDIDATE
+   Ayristirici BOSKEN zaman asimi uyanmasi PLANLANMAMALI. Aksi halde task
+   bos hatta 50 ms'de bir bos yere uyanirdi. */
+static uint8_t r5_aday_yokken_son_tarih_yok(UART_HandleTypeDef *huart)
+{
+    uint32_t t0;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    /* Hatti bosalt ve ayristiriciyi bosalt */
+    t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < 80U)
+    {
+        uart_rx_service();
+    }
+
+    if (uart_rx_get_parser()->len != 0U)
+    {
+        return 0U;                   /* onkosul: aday kalmamali */
+    }
+
+    /* Toparlanma donemi de kapali olmali ki suresiz uyku bildirilsin */
+    if (uart_rx_test_recovery_active() != 0U)
+    {
+        return 0U;
+    }
+
+    return (uint8_t)(uart_rx_next_wait_ms(HAL_GetTick()) == UINT32_MAX);
+}
+
+
+/* RX_TIMEOUT_REARM
+   Zaman asimi sonrasi HALA aday varsa YENI bir 50 ms penceresi kurulmali;
+   uretici ilerlemis gibi gosterilmemeli. Aday bittiginde son tarih kalkar.
+   Eski davranista dolmus son tarih ayni servis turunu tekrar tekrar
+   tetikleyebilirdi. */
+static uint8_t r5_zaman_asimi_yeniden_kurulur(UART_HandleTypeDef *huart)
+{
+    /* Iki ARDISIK bozuk baslik: ilk zaman asimi bir bayt atar, kalanlar
+       yeniden taranir ve arkadaki ikinci aday ayakta kalir. */
+    static const uint8_t ikili[2U * FRAME_HEADER_SIZE] =
+        { 0xAA, 0x55, 0x01, 0x20, 0x37, 0x01, 0x00,
+          0xAA, 0x55, 0x01, 0x20, 0x37, 0x02, 0x00 };
+    uint16_t to_once;
+    uint32_t t0;
+    uint32_t bekleme;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+    to_once = uart_rx_stats.frame_timeouts;
+
+    if (HAL_UART_Transmit(huart, ikili, (uint16_t)sizeof(ikili),
+                          100U) != HAL_OK)
+    {
+        return 0U;
+    }
+    HAL_Delay(3U);
+    uart_rx_service();
+
+    if (uart_rx_get_parser()->len == 0U)
+    {
+        return 0U;
+    }
+
+    /* Ilk zaman asimini bekle */
+    t0 = HAL_GetTick();
+    while (((HAL_GetTick() - t0) < 120U) &&
+           (uart_rx_stats.frame_timeouts == to_once))
+    {
+        uart_rx_service();
+    }
+
+    if (uart_rx_stats.frame_timeouts != (uint16_t)(to_once + 1U))
+    {
+        return 0U;
+    }
+
+    bekleme = uart_rx_next_wait_ms(HAL_GetTick());
+
+    if (uart_rx_get_parser()->len != 0U)
+    {
+        /* Hala aday var: YENI pencere kurulmus olmali, 0 DEGIL. */
+        return (uint8_t)((bekleme != 0U) && (bekleme != UINT32_MAX) &&
+                         (bekleme <= UART_RX_FRAME_TIMEOUT_MS));
+    }
+
+    /* Aday kalmadi: son tarih tamamen kalkmali */
+    return (uint8_t)(bekleme == UINT32_MAX);
+}
+
+
+/* --- RX_PAYLOAD_LIFETIME ---
+   Handler'in KOPYALADIGI deger, ayristirici ilerlese de sabit kalmali.
+   Isaretci saklamanin guvensiz oldugunu gosteren test budur. */
+static uint8_t  r5_kopya[FRAME_MAX_PAYLOAD];
+static uint8_t  r5_kopya_len;
+static uint16_t r5_kopya_seq;
+static uint16_t r5_handler_cagri;
+
+static void r5_test_handler(const frame_info_t *info, void *user_data)
+{
+    (void)user_data;
+
+    r5_handler_cagri++;
+
+    if (r5_kopya_len != 0U)
+    {
+        return;                      /* yalnizca ILK cerceveyi sakla */
+    }
+
+    if ((info->payload != NULL) && (info->payload_len > 0U))
+    {
+        (void)memcpy(r5_kopya, info->payload, info->payload_len);
+        r5_kopya_len = info->payload_len;
+        r5_kopya_seq = info->seq;
+    }
+}
+
+
+static uint8_t r5_payload_omru(UART_HandleTypeDef *huart)
+{
+    uint8_t  cerceve[FRAME_MAX_SIZE];
+    uint8_t  payload[8];
+    uint8_t  n;
+    uint16_t i;
+    uint8_t  sonuc;
+    uint32_t t0;
+
+    for (i = 0U; i < sizeof(payload); i++)
+    {
+        payload[i] = (uint8_t)(0xA0U + i);
+    }
+
+    r5_kopya_len     = 0U;
+    r5_handler_cagri = 0U;
+    (void)memset(r5_kopya, 0, sizeof(r5_kopya));
+
+    /* Handler YALNIZCA start oncesi degistirilebilir */
+    r1_alimi_durdur(huart);
+    uart_rx_set_handler(r5_test_handler, NULL);
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        uart_rx_set_handler(app_protocol_on_frame, NULL);
+        return 0U;
+    }
+
+    n = frame_build(cerceve, (uint8_t)sizeof(cerceve), FRAME_TYPE_SET_OUTPUT,
+                    981U, payload, (uint8_t)sizeof(payload));
+    if ((n == 0U) ||
+        (HAL_UART_Transmit(huart, cerceve, n, 100U) != HAL_OK))
+    {
+        r1_alimi_durdur(huart);
+        uart_rx_set_handler(app_protocol_on_frame, NULL);
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+    HAL_Delay(3U);
+    uart_rx_service();
+
+    /* Ayristiriciyi ILERLET: baska cerceveler gelsin, tampon degissin */
+    for (i = 0U; i < 6U; i++)
+    {
+        uint8_t m = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve),
+                                         (int16_t)i, (int16_t)-i,
+                                         (uint16_t)(982U + i));
+        if ((m == 0U) ||
+            (HAL_UART_Transmit(huart, cerceve, m, 100U) != HAL_OK))
+        {
+            break;
+        }
+        HAL_Delay(2U);
+        uart_rx_service();
+    }
+
+    t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < 20U)
+    {
+        uart_rx_service();
+    }
+
+    /* Saklanan KOPYA degismemis olmali */
+    sonuc = (uint8_t)((r5_kopya_len == (uint8_t)sizeof(payload)) &&
+                      (r5_kopya_seq == 981U) &&
+                      (r5_handler_cagri > 1U) &&
+                      (memcmp(r5_kopya, payload, sizeof(payload)) == 0));
+
+    /* Uygulama handler'ini geri koy */
+    r1_alimi_durdur(huart);
+    uart_rx_set_handler(app_protocol_on_frame, NULL);
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        sonuc = 0U;
+    }
+    return sonuc;
+}
+
+
+/* RX_STALE_DEADLINE_NO_SPIN
+   FAULT'ta eski frame son tarihi dolmus olsa bile bekleme 0'a
+   SABITLENMEMELI: o state'te uygulanabilir bir is yok. Bu, bolum 7.2'nin
+   "gecersiz state'in eski deadline'i taski dondurmesin" kuralidir. */
+static uint8_t r5_eski_son_tarih_spin_yapmaz(UART_HandleTypeDef *huart)
+{
+    uint8_t  sonuc;
+
+    if (r1_fault_ve_durdur(huart) == 0U)
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    /* FAULT'ta, acik kurtarma istegi YOKKEN periyodik uyanma olmamali */
+    sonuc = (uint8_t)(uart_rx_next_wait_ms(HAL_GetTick()) == UINT32_MAX);
+
+    /* Acik istek varsa hemen is vardir */
+    if (uart_rx_request_recovery() == 0U)
+    {
+        sonuc = 0U;
+    }
+    if (uart_rx_next_wait_ms(HAL_GetTick()) != 0U)
+    {
+        sonuc = 0U;
+    }
+
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        sonuc = 0U;
+    }
+    return sonuc;
+}
+
+
 void uart_comm_tests_run(UART_HandleTypeDef *huart)
 {
     uint16_t i_not_run;
@@ -1671,6 +2034,12 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
     uint16_t i_r4_istek;
     uint16_t i_r4_txirq;
     uint16_t i_r4_norun;
+    uint16_t i_r5_sessiz;
+    uint16_t i_r5_devam;
+    uint16_t i_r5_adayyok;
+    uint16_t i_r5_rearm;
+    uint16_t i_r5_payload;
+    uint16_t i_r5_eskison;
     uint8_t  hw;
 
     ctx_kur(&s_ctx, uart_comm_test_kayit, UART_COMM_TEST_MAX);
@@ -1720,6 +2089,13 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
     i_r4_txirq     = uart_comm_test_kaydet("RX_FAULT_TX_IRQ_NO_RETRY",     4U, 1U);
     i_r4_norun     = uart_comm_test_kaydet("RX_NON_RUNNING_NO_PARSER",     4U, 1U);
 
+    i_r5_sessiz  = uart_comm_test_kaydet("RX_TIMEOUT_QUIET",         5U, 1U);
+    i_r5_devam   = uart_comm_test_kaydet("RX_TIMEOUT_CONTINUATION",  5U, 1U);
+    i_r5_adayyok = uart_comm_test_kaydet("RX_TIMEOUT_NO_CANDIDATE",  5U, 1U);
+    i_r5_rearm   = uart_comm_test_kaydet("RX_TIMEOUT_REARM",         5U, 1U);
+    i_r5_payload = uart_comm_test_kaydet("RX_PAYLOAD_LIFETIME",      5U, 1U);
+    i_r5_eskison = uart_comm_test_kaydet("RX_STALE_DEADLINE_NO_SPIN",5U, 1U);
+
     uart_comm_test_bool(i_not_run, p0_not_run_baslangici());
     uart_comm_test_bool(i_engel,   p0_not_run_basariyi_engeller());
     uart_comm_test_bool(i_cift,    p0_cift_sonuc_fail());
@@ -1759,7 +2135,7 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
     if (hw == 0U)
     {
         uint16_t i;
-        for (i = i_r1_busy; i <= i_r4_norun; i++)
+        for (i = i_r1_busy; i <= i_r5_eskison; i++)
         {
             if ((i == i_r2_sinir) || (i == i_r2_pendtc) || (i == i_r2_sarim))
             {
@@ -1855,6 +2231,18 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
 
     uart_comm_test_sonuc(i_r4_norun,
                          (uint8_t)(r4_running_disi_tuketim_yok(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
+
+    /* --- R5 --- */
+    uart_comm_test_bool(i_r5_sessiz,  r5_sessizlikte_zaman_asimi(huart));
+    uart_comm_test_bool(i_r5_devam,   r5_devam_eden_cerceve_dusmez(huart));
+    uart_comm_test_bool(i_r5_adayyok, r5_aday_yokken_son_tarih_yok(huart));
+    uart_comm_test_bool(i_r5_rearm,   r5_zaman_asimi_yeniden_kurulur(huart));
+    uart_comm_test_bool(i_r5_payload, r5_payload_omru(huart));
+
+    uart_comm_test_sonuc(i_r5_eskison,
+                         (uint8_t)(r5_eski_son_tarih_spin_yapmaz(huart)
                                    ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
                          (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
 }

@@ -12,6 +12,7 @@
 #include "frame.h"
 #include "parser.h"
 #include "uart_rx.h"
+#include "app_protocol.h"
 #include "uart_tx.h"
 
 /* P0: butun dogrulama kosucusu UART_COMM_TEST ile sinirlidir. Uretim
@@ -510,9 +511,9 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
 
   lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
-                           (uart_rx_state.last_seq == 1U) &&
-                           (uart_rx_state.joy_x == 1000) &&
-                           (uart_rx_state.joy_y == -500)));
+                           (app_proto_state.last_seq == 1U) &&
+                           (app_proto_state.joy_x == 1000) &&
+                           (app_proto_state.joy_y == -500)));
 
   /* ---------------- T2: sarim ----------------
      SEQUENCE 2..40 ile 39 cerceve daha. Toplam 40 x 13 = 520 bayt; tampon
@@ -540,9 +541,9 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
 
   lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok ==
                             (uint16_t)(ok_once + 40U)) &&
-                           (uart_rx_state.last_seq == 40U) &&
-                           (uart_rx_state.next_seq == 41U) &&
-                           (uart_rx_state.seq_gaps == 0U) &&
+                           (app_proto_state.last_seq == 40U) &&
+                           (app_proto_state.next_seq == 41U) &&
+                           (app_proto_state.seq_gap_events == 0U) &&
                            (uart_rx_get_parser()->len == 0U) &&
                            (uart_rx_get_parser()->bytes_dropped == 0U)));
 
@@ -633,8 +634,8 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
                            (uart_rx_stats.frame_timeouts == to_once) &&
-                           (uart_rx_state.last_seq == 41U) &&
-                           (uart_rx_state.seq_gaps == 0U)));
+                           (app_proto_state.last_seq == 41U) &&
+                           (app_proto_state.seq_gap_events == 0U)));
 
   /* ---------------- T5: gercek UART hatasi ----------------
      Yazilimdan ErrorCallback cagirmak hicbir sey kanitlamaz. USART_CR1_SBK
@@ -673,9 +674,9 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
 
   lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
-                           (uart_rx_state.last_seq == 42U) &&
-                           (uart_rx_state.joy_x == -250) &&
-                           (uart_rx_state.joy_y == 750)));
+                           (app_proto_state.last_seq == 42U) &&
+                           (app_proto_state.joy_x == -250) &&
+                           (app_proto_state.joy_y == 750)));
 
   /* ---------------- T6: basarisiz yeniden baslatma ----------------
      Gercek donanimda restart'in dusmesini deterministik uretmek mumkun
@@ -686,8 +687,8 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
      uart_rx_start ayristiriciyi sifirlayacagi icin onceki sayaclar
      debugger'da gorunsun diye once saklaniyor. */
   lb_frames_ok     = uart_rx_get_parser()->frames_ok;
-  lb_last_seq      = uart_rx_state.last_seq;
-  lb_seq_gaps      = uart_rx_state.seq_gaps;
+  lb_last_seq      = app_proto_state.last_seq;
+  lb_seq_gaps      = app_proto_state.seq_gap_events;
   lb_bytes_dropped = uart_rx_get_parser()->bytes_dropped;
 
   rf_once = uart_rx_stats.restart_fails;
@@ -747,9 +748,9 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   lb_kaynak[lb_sayisi] = LB_KAYNAK_ENJEKTE;
   lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
-                           (uart_rx_state.last_seq == 43U) &&
-                           (uart_rx_state.joy_x == 12) &&
-                           (uart_rx_state.joy_y == -34)));
+                           (app_proto_state.last_seq == 43U) &&
+                           (app_proto_state.joy_x == 12) &&
+                           (app_proto_state.joy_y == -34)));
 
   /* ---------------- T7: TX zincirinin tamami ----------------
      frame_build -> uart_tx_send_copy -> TX DMA -> tel -> RX DMA -> parser.
@@ -788,10 +789,10 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   /* RX tarafi: ayni cerceve geri geldi mi */
   lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
-                           (uart_rx_state.last_seq == 44U) &&
-                           (uart_rx_state.joy_x == 1000) &&
-                           (uart_rx_state.joy_y == -500) &&
-                           (uart_rx_state.seq_gaps == 0U)));
+                           (app_proto_state.last_seq == 44U) &&
+                           (app_proto_state.joy_x == 1000) &&
+                           (app_proto_state.joy_y == -500) &&
+                           (app_proto_state.seq_gap_events == 0U)));
 
   /* ---------------- T8: mesgulken ikinci istek ----------------
      Kabul olcutu: "Bir gonderim surerken ikinci baslatma ilk paketi bozamaz."
@@ -828,9 +829,9 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   lb_kaydet_bool((uint8_t)((uart_rx_get_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
                            (uart_rx_get_parser()->err_crc == crc_once) &&
-                           (uart_rx_state.last_seq == 45U) &&
-                           (uart_rx_state.joy_x == 7) &&
-                           (uart_rx_state.joy_y == -7)));
+                           (app_proto_state.last_seq == 45U) &&
+                           (app_proto_state.joy_x == 7) &&
+                           (app_proto_state.joy_y == -7)));
 
   /* ---------------- T9: kopya semantigi ----------------
      Kabul olcutu: "Cagiranin kaynak tamponu gonderim kabulunden sonra degisse
@@ -860,9 +861,9 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
                            (uart_rx_get_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
                            (uart_rx_get_parser()->err_crc == crc_once) &&
-                           (uart_rx_state.last_seq == 46U) &&
-                           (uart_rx_state.joy_x == -1234) &&
-                           (uart_rx_state.joy_y == 4321)));
+                           (app_proto_state.last_seq == 46U) &&
+                           (app_proto_state.joy_x == -1234) &&
+                           (app_proto_state.joy_y == 4321)));
 
 bitir:
   /* Normal bitiste de, LB_IPTAL ile erken cikista da buraya gelinir.

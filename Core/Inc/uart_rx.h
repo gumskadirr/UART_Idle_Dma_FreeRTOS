@@ -155,25 +155,11 @@ typedef struct
     uint8_t  faulted;
 } uart_rx_stats_t;
 
-/* Cozulmus cercevelerden turetilen durum. Yalnizca main baglaminda
-   guncellenir (uart_rx_service -> uart_rx_drain -> frame_parser_feed ->
-   frame_received), bu yuzden volatile gerekmez.
-
-   NOT: sira takibi (protokol katmani) ile joystick ornegi (uygulama verisi)
-   simdilik ayni yapida. M8'de joystick modu ve komutlar eklenirken
-   seq_tracker_t / joystick_sample_t olarak ayrilacak. */
-typedef struct
-{
-    uint16_t last_seq;        /* en son alinan SEQUENCE */
-    uint16_t next_seq;        /* siradaki beklenen SEQUENCE (TCP: rcv_nxt) */
-    uint16_t seq_gaps;        /* eksik sira numarasi tespit edilen olay sayisi */
-    uint8_t  seq_synced;      /* ilk cerceve referans alindi mi */
-    int16_t  joy_x;
-    int16_t  joy_y;
-} uart_rx_state_t;
+/* NOT (R5): cozulmus cerceveden turetilen UYGULAMA durumu (sira takibi,
+   joystick ornegi) bu dosyadan KALDIRILDI; app_protocol.h icindeki
+   app_proto_state_t'ye tasindi. Tasima katmani protokolu yorumlamaz. */
 
 extern uart_rx_stats_t uart_rx_stats;
-extern uart_rx_state_t uart_rx_state;
 
 /* Alimi baslatir: okuma konumunu sifirlar, circular DMA'yi IDLE olaylariyla
    kurar. Loopback testinde gonderimden ONCE cagrilmali.
@@ -226,6 +212,22 @@ uint8_t uart_rx_request_recovery(void);
 /* Durusun DOGRULANDIGI bilgisi. FAULT olmasi durdugu anlamina gelmez;
    bu iki bilgi bilerek ayri tutulur. 0 iken DMA tamponu KILITLIDIR. */
 uint8_t uart_rx_is_quiescent(void);
+
+/* --- R5 ---
+   Cozulmus cerceveleri alacak handler. YALNIZCA start oncesi (STOPPED veya
+   FAULT) degistirilebilir: calisan alim sirasinda hedefi degistirmek,
+   yarim cercevenin bir handler'a devaminin baskasina gitmesi demektir.
+   Handler kisa calisir, HAL cagirmaz, beklemez. */
+void uart_rx_set_handler(frame_handler_t handler, void *user);
+
+/* Bir sonraki ETKIN son tarihe kadar beklenebilecek sure (ms).
+     0          : hemen yapilacak is var
+     UINT32_MAX : etkin son tarih yok, suresiz uyunabilir
+   Frame zaman asimi, abort siniri, yeniden deneme araligi, toparlanma
+   butcesi ve ornekleme tekrarinin EN YAKININI dondurur. Yalnizca o anda
+   uygulanabilir olan son tarihler hesaba katilir: dolmus ama artik
+   gecersiz bir son tarih 0 dondurup taski surekli donduremez. */
+uint32_t uart_rx_next_wait_ms(uint32_t now);
 
 /* Alim durum makinesinin o anki durumu. stats.faulted yalnizca
    "phase == UART_RX_PHASE_FAULT" bilgisini tasir; ayrinti buradadir. */

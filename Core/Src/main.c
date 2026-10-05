@@ -25,6 +25,7 @@
 #include "uart_tx.h"
 #include "tests.h"
 #include "uart_comm_tests.h"
+#include "app_protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -102,8 +103,13 @@ int main(void)
   birim_testleri_kosur();
 #endif
 
-  /* Alimi baslat: ayristirici ve okuma konumu sifirlanir, circular DMA
-     IDLE olaylariyla kurulur. Loopback gonderiminden ONCE olmali. */
+  /* Teslim hedefi start'tan ONCE kaydedilir (R5): tasima katmani
+     protokolu yorumlamaz, cozulmus cerceveyi uygulama handler'ina verir. */
+  app_protocol_init();
+  uart_rx_set_handler(app_protocol_on_frame, NULL);
+
+  /* Alimi baslat: okuma konumu sifirlanir, circular DMA IDLE olaylariyla
+     kurulur. Loopback gonderiminden ONCE olmali. */
   if (uart_rx_start(&huart2) != HAL_OK) {
     Error_Handler();
   }

@@ -45,6 +45,21 @@ static uint8_t             s_sync_error_on_start;    /* yalnizca test kancasi */
 /* R1: acik alim durumu. Yalnizca main/tuketici baglaminda yazilir. */
 static uart_rx_phase_t     s_phase = UART_RX_PHASE_STOPPED;
 
+/* R5: teslim hedefi. Yalnizca start oncesi degistirilir. */
+static frame_handler_t     s_handler;
+static void               *s_handler_user;
+
+/* R5: zaman asimi ARTIK son TUKETIM anina degil, son gozlenen URETICI
+   ILERLEMESINE bagli. Fark onemli: bir yayin (burst) surerken hicbir
+   bildirim olusmaz ve tuketim de olmaz, ama DMA yaziyordur. Yalnizca
+   tuketim zamanina bakan bir kontrol, akmakta olan gecerli bir cerceveden
+   bayt atardi.
+   s_frame_base_tick zaman asimi penceresinin BASLANGICI: uretici ilerlemesi
+   ya da onceki zaman asimi mudahalesi ile tazelenir. Ikisi ayri olaydir;
+   mudahale "veri geldi" gibi gosterilmez. */
+static uint32_t            s_last_producer;
+static uint32_t            s_frame_base_tick;
+
 /* --- R2: MUTLAK uretim/tuketim sayaclari ---
    Eski kod yalnizca modulo konum (s_read_pos) sakliyordu; bu yuzden "0 yeni
    bayt" ile "256 yeni bayt" ayirt EDILEMIYORDU: tam bir tur uzerine
@@ -94,7 +109,6 @@ static uint32_t            s_sample_retry_tick; /* bir sonraki deneme ani */
 static uint8_t             s_parser_ready;
 
 uart_rx_stats_t uart_rx_stats;
-uart_rx_state_t uart_rx_state;
 
 static void frame_received(const frame_info_t *info, void *user_data);
 static void rx_recover_step(void);
@@ -113,6 +127,17 @@ static uint8_t rx_session_healthy(void);
    (bolum 5.1). Aksi halde zaten kesmeler kapaliyken cagrilan bir yol,
    cikista onlari izinsiz acardi. Icinde HAL cagrisi, parser veya kullanici
    handler'i calismaz; yalnizca birkac register/degisken okunur. */
+/* deadline'a kalan sure; dolmussa 0. uint32 cikarma sarimda da dogru. */
+static uint32_t rx_until(uint32_t now, uint32_t deadline)
+{
+    uint32_t fark = deadline - now;
+
+    /* Gecmis bir son tarih buyuk pozitif gorunur; isaretli karsilastirma
+       ile ayirt edilir. */
+    return ((int32_t)fark <= 0) ? 0U : fark;
+}
+
+
 static uint32_t rx_crit_enter(void)
 {
     uint32_t pri = __get_PRIMASK();
@@ -153,6 +178,111 @@ uart_rx_phase_t uart_rx_get_phase(void)
 }
 
 
+void uart_rx_set_handler(frame_handler_t handler, void *user)
+{
+    /* YALNIZCA start oncesi: calisan alim sirasinda hedefi degistirmek,
+       yarim cercevenin bir handler'a, devaminin baskasina gitmesi demek. */
+    if ((s_phase != UART_RX_PHASE_STOPPED) &&
+        (s_phase != UART_RX_PHASE_FAULT))
+    {
+        return;
+    }
+
+    s_handler      = handler;
+    s_handler_user = user;
+}
+
+
+/* Bir sonraki ETKIN son tarihe kadar beklenebilecek sure.
+     0           : hemen yapilacak is var
+     UINT32_MAX  : etkin son tarih yok, suresiz uyunabilir
+
+   Son tarih YALNIZCA o anda uygulanabilir olan isler icin verilir
+   (bolum 7.2). Dolmus fakat artik gecerli olmayan bir son tarihin 0
+   dondurmesi, taski surekli dondurur: bu fonksiyonun asil isi bunu
+   onlemektir. */
+uint32_t uart_rx_next_wait_ms(uint32_t now)
+{
+    uint32_t best = UINT32_MAX;
+
+    if (s_huart == NULL)
+    {
+        return UINT32_MAX;
+    }
+
+    /* Islenmemis bildirim veya kurtarma istegi: beklemeden is var. */
+    if ((s_rx_error != 0U) || (s_health_bad != 0U))
+    {
+        return 0U;
+    }
+
+    switch (s_phase)
+    {
+        case UART_RX_PHASE_RUNNING:
+            if (s_rx_pending != 0U)
+            {
+                return 0U;           /* tuketilecek veri var */
+            }
+
+            if (s_sample_failing != 0U)
+            {
+                /* Once ornekleme tekrarina kadar uyunur. Eski frame
+                   deadline burada 0 DONDURMEZ; aksi halde bozuk NDTR
+                   penceresinde task surekli donerdi. */
+                best = rx_until(now, s_sample_retry_tick);
+            }
+            else if (s_parser.len != 0U)
+            {
+                best = rx_until(now, s_frame_base_tick +
+                                     UART_RX_FRAME_TIMEOUT_MS);
+            }
+            else
+            {
+                /* Aday yok: frame zaman asimi son tarihi KALKAR. */
+            }
+
+            /* Toparlanma donemi aciksa kapanisini degerlendirmek icin
+               uyanilir; bu da etkin bir son tarihtir. */
+            if (s_recovery_active != 0U)
+            {
+                uint32_t t = rx_until(now, s_last_healthy_tick +
+                                           UART_RX_HEALTHY_MS);
+                if (t < best) { best = t; }
+            }
+            break;
+
+        case UART_RX_PHASE_ABORTING:
+            best = rx_until(now, s_abort_tick + UART_RX_ABORT_TIMEOUT_MS);
+            break;
+
+        case UART_RX_PHASE_RETRY_WAIT:
+            best = rx_until(now, s_restart_tick + UART_RX_RESTART_RETRY_MS);
+            {
+                uint32_t t = rx_until(now, s_recovery_start_tick +
+                                           UART_RX_RECOVERY_BUDGET_MS);
+                if (t < best) { best = t; }
+            }
+            break;
+
+        case UART_RX_PHASE_FAULT:
+            if (s_recover_request != 0U)
+            {
+                return 0U;
+            }
+            /* FAULT'ta periyodik uyanma YOK: otomatik yeniden deneme
+               olmadigi icin beklenecek bir son tarih de yok. */
+            break;
+
+        case UART_RX_PHASE_STARTING:
+        case UART_RX_PHASE_STOPPED:
+        default:
+            break;
+    }
+
+    return best;
+}
+
+
 /* Ilerleme sayaclarinin TEK sifirlama noktasi. Yalnizca DMA durdurulup eski
    IRQ kaynaklari temizlendikten SONRA cagrilir; aksi halde hala calisan bir
    stream'in turlari kaybolur. Butun start/recover yollari buradan gecer:
@@ -171,7 +301,9 @@ static void rx_reset_progress_after_stop(void)
     s_sample_failing    = 0U;
     s_sample_fail_tick  = 0U;
     s_sample_retry_tick = 0U;
+    s_last_producer     = 0U;
     s_last_rx_tick      = HAL_GetTick();
+    s_frame_base_tick   = s_last_rx_tick;
 }
 
 
@@ -904,52 +1036,59 @@ uint8_t uart_rx_is_quiescent(void)
 }
 
 
-/* Bekleyen aday, UART_RX_FRAME_TIMEOUT_MS boyunca TAMPON ILERLEMEDEN
+/* Bekleyen aday, UART_RX_FRAME_TIMEOUT_MS boyunca URETICI ILERLEMEDEN
    duruyorsa dusurulur. Bozuk bir LENGTH alani arkasindaki gecerli cerceveyi
-   sonsuza kadar bekletmesin. */
+   sonsuza kadar bekletmesin.
+
+   Sira onemli (R5): ONCE butceli tuketim, SONRA zaman asimi karari.
+   Backlog varsa ya da uretici ilerlemisse zaman asimi VERILMEZ. */
 static void check_frame_timeout(void)
 {
+    uint32_t produced;
+    uint32_t now;
+
     if ((s_huart == NULL) || (s_parser.len == 0U))
     {
-        return;                      /* bekleyen aday yok */
+        return;                      /* bekleyen aday yok: son tarih de yok */
     }
 
-    /* uint32_t cikarma sarimda da dogru sonuc verir */
-    if ((HAL_GetTick() - s_last_rx_tick) < UART_RX_FRAME_TIMEOUT_MS)
+    /* Gecerli ornek alinamiyorsa KARAR VERILMEZ: ilerleme olup olmadigini
+       bilmeden aday dusurmek, akmakta olan cerceveden bayt atmaktir. */
+    if (uart_rx_sample_producer(&produced) == 0U)
     {
         return;
     }
 
-    /* Sure doldu, ama karar VERMEDEN once tamponun ilerleyip ilerlemedigine
-       bakilir. Kosul "bildirim gelmedi" DEGIL "tampon ilerlemedi"; ikisi ayni
-       sey degil, cunku bir yayin (burst) surerken hicbir bildirim olusmaz:
-       IDLE son bayttan ~87 us sonra gelir, HT/TC yalnizca 128./256. baytta
-       tetiklenir. 57 baytlik bir devam yayini 115200'de 4,95 ms surer ve bu
-       sure boyunca DMA yaziyor ama s_rx_pending sifirdir. Yalnizca zaman
-       damgasina baksak akmakta olan gecerli bir cerceveden bayt atardik.
-       Ilerlemis: cerceve hala geliyor -> zaman asimi yok, tuket.
-       uart_rx_drain zaman damgasini da yeniler. */
+    if (produced != s_consumed)
     {
-        uint32_t produced;
+        /* Backlog var: once tuket. Zaman asimi bu tur verilmez. */
+        (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+        return;
+    }
 
-        /* Gecerli ornek alinamiyorsa zaman asimi KARARI VERILMEZ: ilerleme
-           olup olmadigini bilmeden aday dusurmek, akmakta olan gecerli bir
-           cerceveden bayt atmak demektir. */
-        if (uart_rx_sample_producer(&produced) == 0U)
-        {
-            return;
-        }
+    now = HAL_GetTick();
 
-        if (produced != s_consumed)
-        {
-            uart_rx_drain();
-            return;
-        }
+    if (produced != s_last_producer)
+    {
+        /* Uretici ilerlemis: pencere bastan baslar. */
+        s_last_producer   = produced;
+        s_frame_base_tick = now;
+        return;
+    }
+
+    if ((now - s_frame_base_tick) < UART_RX_FRAME_TIMEOUT_MS)
+    {
+        return;
     }
 
     frame_parser_timeout(&s_parser, frame_received, NULL);
     uart_rx_stats.frame_timeouts++;
-    s_last_rx_tick = HAL_GetTick();
+
+    /* Mudahale ani, uretici ilerleme aninDAN AYRI tutulur: aday hala
+       varsa YENI bir 50 ms penceresi kurulur, uretici ilerlemis gibi
+       GOSTERILMEZ. Aday kalmadiysa son tarih tamamen kalkar (parser.len
+       sifir oldugu icin bu fonksiyon zaten erken doner). */
+    s_frame_base_tick = now;
 }
 
 
@@ -1221,46 +1360,24 @@ uint32_t uart_rx_test_get_wrap_base(void)
 
 
 /* Dogrulanmis bir cerceve cozuldugunde frame_parser_feed tarafindan cagrilir.
-   main baglaminda calisir: uart_rx_service -> uart_rx_drain ->
+   Tuketici baglaminda calisir: uart_rx_service -> uart_rx_service_budget ->
    frame_parser_feed -> buraya.
-   info->payload YALNIZCA bu cagri suresince gecerli; saklanacaksa
-   kopyalanmali.
 
-   Cerceve sayisi burada tutulmuyor: s_parser.frames_ok zaten ayni bilgiyi
-   veriyor, iki yerde tutmak tutarsizlik riski demek. */
+   R5: BU KATMAN ARTIK PROTOKOLU YORUMLAMIYOR. Sira takibi ve joystick
+   cozme uygulama handler'ina tasindi (app_protocol.c); tasima katmani
+   yalnizca ayristirma ve teslimden sorumlu. Boylece M1'de uart_comm icine
+   tasinacak cekirdek, protokol bilgisinden bagimsiz kaliyor.
+
+   info->payload YALNIZCA bu cagri suresince gecerli; saklanacaksa
+   kopyalanmali. Cerceve sayisi burada tutulmuyor: s_parser.frames_ok zaten
+   ayni bilgiyi veriyor. */
 static void frame_received(const frame_info_t *info, void *user_data)
 {
     (void)user_data;
 
-    if (uart_rx_state.seq_synced == 0U)
+    if (s_handler != NULL)
     {
-        /* Ilk cerceve: gonderenin hangi degerden basladigini bilemeyiz.
-           Karsilastirma yapmadan referans aliyoruz (RTP alicisi da boyle
-           yapar: ilk pakette sira numarasina senkronize olur). */
-        uart_rx_state.seq_synced = 1U;
-    }
-    else if (info->seq != uart_rx_state.next_seq)
-    {
-        uart_rx_state.seq_gaps++;
-    }
-    else
-    {
-        /* Beklenen sira geldi */
-    }
-
-    uart_rx_state.last_seq = info->seq;
-
-    /* Beklentiyi GELEN degerden turetiyoruz. "next_seq++" yazsaydik tek bir
-       kayiptan sonra kalici olarak bir geri kalir ve sonraki her cerceveyi
-       kayip sayardik. (uint16_t) cast'i 65535 -> 0 sarimini halleder. */
-    uart_rx_state.next_seq = (uint16_t)(info->seq + 1U);
-
-    if ((info->type == FRAME_TYPE_JOYSTICK) && (info->payload_len == 4U))
-    {
-        uart_rx_state.joy_x = (int16_t)((uint16_t)info->payload[0] |
-                                       ((uint16_t)info->payload[1] << 8));
-        uart_rx_state.joy_y = (int16_t)((uint16_t)info->payload[2] |
-                                       ((uint16_t)info->payload[3] << 8));
+        s_handler(info, s_handler_user);
     }
 }
 
