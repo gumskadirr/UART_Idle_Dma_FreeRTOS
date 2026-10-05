@@ -33,6 +33,13 @@
    degil. */
 #define UART_RX_RESTART_MAX_TRIES   5U
 
+/* Uretici ornegi bu sure boyunca hic tutarli alinamazsa RX saglik hatasi
+   sayilir ve toparlanmaya gidilir (bolum 6.2 adim 4). Tek tek basarisiz
+   ornekler normaldir: DMA'nin yeniden yukleme penceresine denk gelmek
+   beklenen bir durumdur. Surekli basarisizlik ise NDTR'nin ilerlemedigi
+   ya da stream'in bozuldugu anlamina gelir. */
+#define UART_RX_SAMPLE_FAIL_MS     20U
+
 /* --- Alim durumu (R1) ---
    Enum adi uart_rx_PHASE_t: "uart_rx_state_t" bu baslikta ZATEN kullaniliyor
    ve joystick/sira takibi yapisinin adi. Iki ayri kavrama ayni adi vermek
@@ -85,6 +92,18 @@ typedef struct
     uint16_t start_fails;
     uint16_t start_rejects;
 
+    /* --- R2 ---
+       sample_defers: tutarsiz uretici ornegi nedeniyle ertelenen tuketim
+       turu sayisi. Sifirdan buyuk olmasi hata DEGILDIR (tur sinirina denk
+       gelmek normaldir); SUREKLI artmasi NDTR'nin ilerlemedigini gosterir.
+       sample_fails: 20 ms boyunca gecerli ornek alinamadi -> saglik hatasi.
+       overruns / discarded_bytes: tam tur kaybi (politika R3'te tamamlanir;
+       sayac R2'de kuruluyor ki kayip hicbir asamada sessiz kalmasin). */
+    uint16_t sample_defers;
+    uint16_t sample_fails;
+    uint16_t overruns;
+    uint32_t discarded_bytes;
+
     /* UART_RX_RESTART_MAX_TRIES denemede toparlanamadi: ALIM DURDU.
        Sessizce olmek yerine gorunur olmek icin var. Cikis yolu yalnizca
        uart_rx_start() ile yeniden kurmaktir. */
@@ -131,6 +150,20 @@ extern uart_rx_state_t uart_rx_state;
    sayaclari KORUNUR. */
 HAL_StatusTypeDef uart_rx_start(UART_HandleTypeDef *huart);
 
+/* --- R2: mutlak uretim/tuketim konumlari (teshis ve test icin) ---
+   produced: DMA'nin tampona yazdigi toplam bayt (ornekleme basarisizsa
+   cagri 0 doner ve *out YAZILMAZ).
+   consumed: ayristiriciya verilmis toplam bayt.
+   Ikisinin farki bekleyen veri; UART_RX_BUF_SIZE'a ulasmasi tam tur
+   kaybidir. Modulo konumla bu ayrim YAPILAMIYORDU. */
+uint8_t  uart_rx_get_produced(uint32_t *out);
+uint32_t uart_rx_get_consumed(void);
+
+/* Uretici konumunun saf aritmetigi (bolum 6.2). Donanimdan bagimsiz
+   oldugu icin sinir degerleri dogrudan sinanabilir. */
+uint32_t uart_rx_producer_from(uint32_t wrap_base, uint8_t pending_tc,
+                               uint32_t ndtr);
+
 /* Alim durum makinesinin o anki durumu. stats.faulted yalnizca
    "phase == UART_RX_PHASE_FAULT" bilgisini tasir; ayrinti buradadir. */
 uart_rx_phase_t uart_rx_get_phase(void);
@@ -161,6 +194,16 @@ void uart_rx_force_restart_fail(uint8_t enable);
 
 /* Kesmeden gelmis gibi bir hata bildirimi enjekte eder. */
 void uart_rx_test_inject_error(void);
+
+/* --- R2 kancalari --- */
+
+/* Surekli gecersiz uretici ornegi taklidi: 3 deneme / 1 ms erteleme / 20 ms
+   saglik hatasi yolunu sinamak icin. */
+void uart_rx_test_force_sample_fail(uint8_t enable);
+
+/* Tamamlanmis turlarin toplami; abort sirasindaki TC'nin sayilmadigini
+   dogrulamak icin okunur. */
+uint32_t uart_rx_test_get_wrap_base(void);
 
 /* --- R1 kancalari ---
    Gercek donanimda "ReceiveToIdle_DMA basarisiz oldu" durumunu guvenilir

@@ -565,6 +565,326 @@ static uint8_t r1_senkron_hata_running_olmaz(UART_HandleTypeDef *huart)
 }
 
 
+/* ==================== R2: gercek tur sayaci ve tutarli ornek ===========
+   Sinir aritmetigi donanimsiz kosar (saf fonksiyon); sarim ve oturum
+   davranisi karttan dogrulanir. Ikisi AYRI testlerdir: model sonucu
+   donanim NDTR/TC sirasinin kaniti degildir. */
+
+/* N bayt uretilmis durumun "ISR islemis" gosterimi:
+   wrap_base = tam turlar, pending_tc = 0, ndtr = 256 - tur ici konum. */
+static uint32_t r2_yerlesik(uint32_t n)
+{
+    uint32_t tur = n / UART_RX_BUF_SIZE;
+    uint32_t poz = n % UART_RX_BUF_SIZE;
+
+    return uart_rx_producer_from(tur * UART_RX_BUF_SIZE, 0U,
+                                 UART_RX_BUF_SIZE - poz);
+}
+
+
+/* Ayni N'in "TC bayragi kalkti ama ISR calismadi" gosterimi:
+   son tur wrap_base'e HENUZ eklenmemis. */
+static uint32_t r2_bekleyen_tc(uint32_t n)
+{
+    uint32_t tur = n / UART_RX_BUF_SIZE;
+    uint32_t poz = n % UART_RX_BUF_SIZE;
+
+    if (tur == 0U)
+    {
+        return r2_yerlesik(n);        /* bekleyen tur yok */
+    }
+
+    return uart_rx_producer_from((tur - 1U) * UART_RX_BUF_SIZE, 1U,
+                                 UART_RX_BUF_SIZE - poz);
+}
+
+
+/* RX_PRODUCER_BOUNDARIES
+   Tur sinirlarinda mutlak konum tam olarak uretilen bayt sayisi olmali.
+   Eski modulo konum 0 ile 256'yi ayni gosteriyordu; asil hata buydu. */
+static uint8_t r2_sinir_degerleri(void)
+{
+    static const uint32_t ornekler[] =
+        { 0U, 1U, 127U, 128U, 255U, 256U, 257U, 511U, 512U, 513U, 768U };
+    uint16_t i;
+
+    for (i = 0U; i < (sizeof(ornekler) / sizeof(ornekler[0])); i++)
+    {
+        if (r2_yerlesik(ornekler[i]) != ornekler[i])
+        {
+            return 0U;
+        }
+    }
+
+    /* 0 ile 256 ARTIK ayni degil: tasmanin gorulebilmesi buna bagli. */
+    return (uint8_t)(r2_yerlesik(0U) != r2_yerlesik(UART_RX_BUF_SIZE));
+}
+
+
+/* RX_PENDING_TC
+   TC bayragi set, ISR henuz calismamis, NDTR yeniden yuklenmis durumda da
+   ayni konum bulunmali; ISR calistiktan SONRA deger DEGISMEMELI. */
+static uint8_t r2_bekleyen_tc_telafisi(void)
+{
+    static const uint32_t ornekler[] =
+        { 256U, 257U, 300U, 511U, 512U, 700U };
+    uint16_t i;
+
+    for (i = 0U; i < (sizeof(ornekler) / sizeof(ornekler[0])); i++)
+    {
+        if (r2_bekleyen_tc(ornekler[i]) != ornekler[i])
+        {
+            return 0U;
+        }
+        if (r2_bekleyen_tc(ornekler[i]) != r2_yerlesik(ornekler[i]))
+        {
+            return 0U;      /* ISR oncesi ve sonrasi ayni konum */
+        }
+    }
+    return 1U;
+}
+
+
+/* RX_COUNTER_WRAP
+   wrap_base ve consumed UINT32 sinirini gecerken FARK dogru kalmali.
+   Mutlak sayaclar buyudugu icin bu kacinilmaz bir durum, hata degil. */
+static uint8_t r2_sayac_sarimi(void)
+{
+    uint32_t base = 0xFFFFFF00UL;      /* bir sonraki turda sarar */
+    uint32_t produced;
+    uint32_t consumed;
+
+    /* Tur ici 100 bayt: 0xFFFFFF00 + 100 */
+    produced = uart_rx_producer_from(base, 0U, UART_RX_BUF_SIZE - 100U);
+    if (produced != (uint32_t)(base + 100U))
+    {
+        return 0U;
+    }
+
+    /* Tuketici sarimin ONCESINDE, uretici SONRASINDA */
+    consumed = (uint32_t)(base + 200U);
+    produced = uart_rx_producer_from((uint32_t)(base + UART_RX_BUF_SIZE),
+                                     0U, UART_RX_BUF_SIZE - 50U);
+
+    /* Beklenen fark: (base+256+50) - (base+200) = 106 */
+    if ((uint32_t)(produced - consumed) != 106U)
+    {
+        return 0U;
+    }
+
+    /* Tam sarim: consumed UINT32_MAX'a cok yakin, produced sarmis */
+    consumed = 0xFFFFFFF0UL;
+    produced = 0x00000010UL;           /* 32 bayt ileri */
+    return (uint8_t)((uint32_t)(produced - consumed) == 32U);
+}
+
+
+/* RX_SAMPLE_STUCK
+   Surekli gecersiz ornekte: tuketici ILERLEMEZ, erteleme sayaci artar,
+   CPU sonsuz donguye girmez ve 20 ms sonunda GORUNUR saglik hatasi olusur. */
+static uint8_t r2_ornek_takildi(UART_HandleTypeDef *huart)
+{
+    uint32_t consumed_once;
+    uint16_t defers_once;
+    uint16_t fails_once;
+    uint32_t t0;
+    uint8_t  sonuc;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    consumed_once = uart_rx_get_consumed();
+    defers_once   = uart_rx_stats.sample_defers;
+    fails_once    = uart_rx_stats.sample_fails;
+
+    uart_rx_test_force_sample_fail(1U);
+
+    /* 40 ms boyunca servis dondur: 20 ms sinirini gecmeli. Sonsuz dongu
+       olsaydi bu cagri hic donmezdi; donmesi testin bir parcasi. */
+    t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < 40U)
+    {
+        uart_rx_service();
+    }
+
+    uart_rx_test_force_sample_fail(0U);
+
+    sonuc = (uint8_t)((uart_rx_get_consumed() == consumed_once) &&
+                      (uart_rx_stats.sample_defers > defers_once) &&
+                      (uart_rx_stats.sample_fails ==
+                       (uint16_t)(fails_once + 1U)));
+
+    /* Saglik hatasi RX toparlanmasini tetikledi; alimi tekrar kur. */
+    r1_alimi_durdur(huart);
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        sonuc = 0U;
+    }
+    return sonuc;
+}
+
+
+/* RX_ABORT_TC_IGNORED
+   RUNNING/STARTING disindaki bir oturumda gelen TC normal uretime
+   EKLENMEMELI: iptal edilen oturumun turu yeni oturumu ileri sicratirdi. */
+static uint8_t r2_abort_tc_sayilmaz(UART_HandleTypeDef *huart)
+{
+    uint32_t base_once;
+    uint8_t  sonuc;
+
+    /* Alimi FAULT'a dusur: phase artik RUNNING/STARTING degil */
+    if (r1_fault_ve_durdur(huart) == 0U)
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    base_once = uart_rx_test_get_wrap_base();
+
+    /* Bu oturuma ait OLMAYAN bir TC bildirimi */
+    huart->RxEventType = HAL_UART_RXEVENT_TC;
+    HAL_UARTEx_RxEventCallback(huart, UART_RX_BUF_SIZE);
+
+    sonuc = (uint8_t)(uart_rx_test_get_wrap_base() == base_once);
+
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        sonuc = 0U;
+    }
+    return sonuc;
+}
+
+
+/* RX_PRODUCER_RESTART
+   Birden cok turdan sonra yeniden kurulan oturumun ilk bayti producer = 1
+   olmali; eski wrap_base sizip sahte tasma uretmemeli. */
+static uint8_t r2_restart_sifirlar(UART_HandleTypeDef *huart)
+{
+    uint8_t  cerceve[FRAME_MAX_SIZE];
+    uint8_t  n;
+    uint32_t produced;
+    uint16_t overruns_once;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    /* Birkac tur uret: 24 x 13 = 312 bayt, bir turu asar */
+    for (n = 0U; n < 24U; n++)
+    {
+        uint8_t m = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve),
+                                         1, 1, (uint16_t)(700U + n));
+        if (m == 0U)
+        {
+            return 0U;
+        }
+        if (HAL_UART_Transmit(huart, cerceve, m, 100U) != HAL_OK)
+        {
+            return 0U;
+        }
+        HAL_Delay(1U);
+        uart_rx_service();
+    }
+
+    if (uart_rx_test_get_wrap_base() == 0U)
+    {
+        return 0U;                  /* onkosul: en az bir tur donmus olmali */
+    }
+
+    overruns_once = uart_rx_stats.overruns;
+
+    /* Yeniden kur: sayaclar sifirlanmali */
+    r1_alimi_durdur(huart);
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        return 0U;
+    }
+
+    if ((uart_rx_test_get_wrap_base() != 0U) ||
+        (uart_rx_get_consumed() != 0U))
+    {
+        return 0U;
+    }
+
+    /* Yeni oturumun ILK bayti: producer tam olarak 1 olmali */
+    if (HAL_UART_Transmit(huart, cerceve, 1U, 100U) != HAL_OK)
+    {
+        return 0U;
+    }
+    HAL_Delay(2U);
+
+    if (uart_rx_get_produced(&produced) == 0U)
+    {
+        return 0U;
+    }
+
+    uart_rx_service();
+
+    return (uint8_t)((produced == 1U) &&
+                     (uart_rx_stats.overruns == overruns_once));
+}
+
+
+/* RX_TC_IDLE_SAME_POSITION
+   Sarim sinirinda TC ve IDLE ayni konumu bildirir. IDLE'in Size == 256
+   bildirimi IKINCI bir tur olarak sayilmamali: 512 bayt gonderip tam iki
+   tur bekliyoruz, uc degil. */
+static uint8_t r2_tc_idle_ayni_konum(UART_HandleTypeDef *huart)
+{
+    uint8_t  blok[64];
+    uint16_t i;
+    uint32_t base_once;
+    uint32_t produced_once;
+    uint32_t produced;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    for (i = 0U; i < sizeof(blok); i++)
+    {
+        blok[i] = 0x00U;            /* SYNC degil: ayristirici hepsini eler */
+    }
+
+    if (uart_rx_get_produced(&produced_once) == 0U)
+    {
+        return 0U;
+    }
+    base_once = uart_rx_test_get_wrap_base();
+
+    /* 8 x 64 = 512 bayt: tam iki tur. Her blok sonrasi tuket ki tasma
+       politikasi devreye girip olcumu bozmasin. */
+    for (i = 0U; i < 8U; i++)
+    {
+        if (HAL_UART_Transmit(huart, blok, (uint16_t)sizeof(blok),
+                              100U) != HAL_OK)
+        {
+            return 0U;
+        }
+        HAL_Delay(2U);
+        uart_rx_service();
+    }
+
+    HAL_Delay(5U);
+    uart_rx_service();
+
+    if (uart_rx_get_produced(&produced) == 0U)
+    {
+        return 0U;
+    }
+
+    /* TAM 512 bayt ilerlemis olmali: IDLE'in sarim sinirindaki Size == 256
+       bildirimi ikinci kez sayilsaydi 768 gorurduk. */
+    return (uint8_t)(((uint32_t)(produced - produced_once) == 512U) &&
+                     ((uint32_t)(uart_rx_test_get_wrap_base() - base_once) ==
+                      (2U * UART_RX_BUF_SIZE)));
+}
+
+
 void uart_comm_tests_run(UART_HandleTypeDef *huart)
 {
     uint16_t i_not_run;
@@ -578,6 +898,13 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
     uint16_t i_r1_hwaktif;
     uint16_t i_r1_startfail;
     uint16_t i_r1_senkron;
+    uint16_t i_r2_sinir;
+    uint16_t i_r2_pendtc;
+    uint16_t i_r2_sarim;
+    uint16_t i_r2_takildi;
+    uint16_t i_r2_aborttc;
+    uint16_t i_r2_restart;
+    uint16_t i_r2_tcidle;
     uint8_t  hw;
 
     ctx_kur(&s_ctx, uart_comm_test_kayit, UART_COMM_TEST_MAX);
@@ -602,6 +929,15 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
     i_r1_hwaktif   = uart_comm_test_kaydet("RX_START_REFUSED_WHILE_HW_ACTIVE",1U, 1U);
     i_r1_startfail = uart_comm_test_kaydet("RX_START_FAIL_VISIBLE",           1U, 1U);
     i_r1_senkron   = uart_comm_test_kaydet("RX_SYNC_ERROR_BEFORE_HAL_RETURN", 1U, 1U);
+
+    /* Ilk ucu saf aritmetik: donanim GEREKTIRMEZ. */
+    i_r2_sinir   = uart_comm_test_kaydet("RX_PRODUCER_BOUNDARIES",    2U, 0U);
+    i_r2_pendtc  = uart_comm_test_kaydet("RX_PENDING_TC",             2U, 0U);
+    i_r2_sarim   = uart_comm_test_kaydet("RX_COUNTER_WRAP",           2U, 0U);
+    i_r2_takildi = uart_comm_test_kaydet("RX_SAMPLE_STUCK",           2U, 1U);
+    i_r2_aborttc = uart_comm_test_kaydet("RX_ABORT_TC_IGNORED",       2U, 1U);
+    i_r2_restart = uart_comm_test_kaydet("RX_PRODUCER_RESTART",       2U, 1U);
+    i_r2_tcidle  = uart_comm_test_kaydet("RX_TC_IDLE_SAME_POSITION",  2U, 1U);
 
     uart_comm_test_bool(i_not_run, p0_not_run_baslangici());
     uart_comm_test_bool(i_engel,   p0_not_run_basariyi_engeller());
@@ -633,12 +969,21 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
                          (uint32_t)LB_BEKLENEN_ADET,
                          (uint32_t)lb_sayisi);
 
+    /* --- R2: donanimsiz sinir aritmetigi (jumper olmasa da kosar) --- */
+    uart_comm_test_bool(i_r2_sinir,  r2_sinir_degerleri());
+    uart_comm_test_bool(i_r2_pendtc, r2_bekleyen_tc_telafisi());
+    uart_comm_test_bool(i_r2_sarim,  r2_sayac_sarimi());
+
     /* --- R1 --- */
     if (hw == 0U)
     {
         uint16_t i;
-        for (i = i_r1_busy; i <= i_r1_senkron; i++)
+        for (i = i_r1_busy; i <= i_r2_tcidle; i++)
         {
+            if ((i == i_r2_sinir) || (i == i_r2_pendtc) || (i == i_r2_sarim))
+            {
+                continue;           /* zaten kostu */
+            }
             uart_comm_test_sonuc(i, (uint8_t)UART_COMM_TEST_SKIP,
                                  (uint8_t)UART_COMM_TEST_SRC_SW, 0U, 0U);
         }
@@ -664,6 +1009,20 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
                          (uint8_t)(r1_senkron_hata_running_olmaz(huart)
                                    ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
                          (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
+
+    /* --- R2: donanimli --- */
+    uart_comm_test_sonuc(i_r2_takildi,
+                         (uint8_t)(r2_ornek_takildi(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
+
+    uart_comm_test_sonuc(i_r2_aborttc,
+                         (uint8_t)(r2_abort_tc_sayilmaz(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
+
+    uart_comm_test_bool(i_r2_restart, r2_restart_sifirlar(huart));
+    uart_comm_test_bool(i_r2_tcidle,  r2_tc_idle_ayni_konum(huart));
 }
 
 #endif /* UART_COMM_TEST */

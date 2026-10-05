@@ -6,8 +6,10 @@
  *
  * Sahiplik:
  *   s_dma_buf   -> DMA yazar, bu modul okur
- *   s_read_pos  -> yalnizca uart_rx_drain yazar, DMA hic bakmaz
- * Iki taraf farkli degiskenlere sahip oldugu icin kilit gerekmez.
+ *   s_wrap_base -> yalnizca RX TC callback'i yazar (kesme)
+ *   s_consumed  -> yalnizca tuketici baglami yazar, DMA hic bakmaz
+ * Uretici ve tuketici farkli degiskenlere sahip; ortak okuma kisa kritik
+ * bolumde tutarli ORNEKLENIR (bolum 6.2).
  *
  * Not: klasik ring buffer literaturu head/tail der, ama bu iki terimin
  * anlami kaynaga gore ters cevrilir (Linux kfifo bu yuzden in/out kullanir).
@@ -21,7 +23,6 @@
 /* --- Modul ici durum --- */
 static UART_HandleTypeDef *s_huart;                  /* uart_rx_start baglar */
 static uint8_t             s_dma_buf[UART_RX_BUF_SIZE];
-static uint16_t            s_read_pos;               /* okunmamis ilk bayt */
 static frame_parser_t      s_parser;                 /* yarim cerceve durumu */
 static volatile uint8_t    s_rx_pending;             /* kesme set eder */
 static volatile uint8_t    s_rx_error;               /* kesme set eder */
@@ -36,11 +37,38 @@ static uint32_t            s_restart_tick;           /* son deneme ani */
 #ifdef UART_COMM_TEST
 static uint8_t             s_force_restart_fail;     /* yalnizca test kancasi */
 static uint8_t             s_force_start_fail;       /* yalnizca test kancasi */
+static uint8_t             s_force_sample_fail;      /* yalnizca test kancasi */
 static uint8_t             s_sync_error_on_start;    /* yalnizca test kancasi */
 #endif
 
 /* R1: acik alim durumu. Yalnizca main/tuketici baglaminda yazilir. */
 static uart_rx_phase_t     s_phase = UART_RX_PHASE_STOPPED;
+
+/* --- R2: MUTLAK uretim/tuketim sayaclari ---
+   Eski kod yalnizca modulo konum (s_read_pos) sakliyordu; bu yuzden "0 yeni
+   bayt" ile "256 yeni bayt" ayirt EDILEMIYORDU: tam bir tur uzerine
+   yazildiginda konumlar esit gorunur ve kayip sessizce gizlenirdi.
+
+   Artik iki taraf da mutlak bayt sayisi tutuyor:
+     s_wrap_base  tamamlanmis turlarin toplami. YALNIZCA gercek DMA TC
+                  olayinda, RX callback'inde UART_RX_BUF_SIZE artar.
+     s_consumed   ayristiriciya verilmis toplam bayt (yalnizca tuketici yazar)
+   Anlik uretim konumu wrap_base + tur ici konum (NDTR'den) olarak
+   ORNEKLENIR; saklanmaz.
+
+   Sayaclar unsigned modulo calisir: fark (produced - consumed) 2^32 sarimi
+   boyunca da dogrudur. Mesru farkin 2^31'den kucuk oldugu kabul edilir. */
+static volatile uint32_t   s_wrap_base;
+static uint32_t            s_consumed;
+
+/* Oturum kimligi: her durdurma/yeniden kurma yeni bir uretim oturumudur.
+   Abort sirasinda olusan TC'nin normal uretime eklenmesini engeller. */
+static volatile uint32_t   s_rx_session;
+
+/* Tutarsiz ornekleme penceresi (bkz. bolum 6.2 adim 4). */
+static uint8_t             s_sample_failing;    /* acik basarisizlik penceresi */
+static uint32_t            s_sample_fail_tick;  /* ilk basarisiz ornek ani */
+static uint32_t            s_sample_retry_tick; /* bir sonraki deneme ani */
 
 /* Ayristirici sayaclari SOGUK kurulumda bir kez sifirlanir; sonraki
    kurulumlar hata gecmisini korur (bkz. uart_rx.h sozlesmesi). */
@@ -53,10 +81,39 @@ static void frame_received(const frame_info_t *info, void *user_data);
 static void uart_rx_recover(void);
 static void restart_failed(void);
 static void check_frame_timeout(void);
-static uint16_t dma_write_pos(void);
 static void rx_set_phase(uart_rx_phase_t phase);
 static uint8_t rx_hw_receiving(const UART_HandleTypeDef *huart);
 static uint8_t rx_session_healthy(void);
+
+
+/* --- Kisa kritik bolum ---
+   Eski PRIMASK saklanip geri yuklenir; kosulsuz __enable_irq() YAPILMAZ
+   (bolum 5.1). Aksi halde zaten kesmeler kapaliyken cagrilan bir yol,
+   cikista onlari izinsiz acardi. Icinde HAL cagrisi, parser veya kullanici
+   handler'i calismaz; yalnizca birkac register/degisken okunur. */
+static uint32_t rx_crit_enter(void)
+{
+    uint32_t pri = __get_PRIMASK();
+    __disable_irq();
+    return pri;
+}
+
+static void rx_crit_exit(uint32_t pri)
+{
+    __set_PRIMASK(pri);
+}
+
+
+/* DMA stream'inin HAM transfer-complete bayragi. ISR bu bayragi temizleyip
+   ardindan callback'i cagirir; yani "bayrak set" demek "tur bitti ama
+   wrap_base henuz artmadi" demektir. */
+static uint32_t rx_tcif_raw(void)
+{
+    const DMA_HandleTypeDef *hdma = s_huart->hdmarx;
+
+    return (uint32_t)(__HAL_DMA_GET_FLAG(hdma,
+                      __HAL_DMA_GET_TC_FLAG_INDEX(hdma)) != 0U);
+}
 
 
 /* stats.faulted ile phase tek kaynaktan turetilir: ikisini ayri ayri
@@ -71,6 +128,156 @@ static void rx_set_phase(uart_rx_phase_t phase)
 uart_rx_phase_t uart_rx_get_phase(void)
 {
     return s_phase;
+}
+
+
+/* Ilerleme sayaclarinin TEK sifirlama noktasi. Yalnizca DMA durdurulup eski
+   IRQ kaynaklari temizlendikten SONRA cagrilir; aksi halde hala calisan bir
+   stream'in turlari kaybolur. Butun start/recover yollari buradan gecer:
+   tek bir yol atlanirsa eski oturumun wrap_base'i yeni oturuma sizar ve
+   sahte taşma gorunur. */
+static void rx_reset_progress_after_stop(void)
+{
+    uint32_t pri = rx_crit_enter();
+
+    s_wrap_base = 0U;
+    s_consumed  = 0U;
+    s_rx_session++;                 /* yeni uretim oturumu */
+
+    rx_crit_exit(pri);
+
+    s_sample_failing    = 0U;
+    s_sample_fail_tick  = 0U;
+    s_sample_retry_tick = 0U;
+    s_last_rx_tick      = HAL_GetTick();
+}
+
+
+/* Uretici konumunun SAF aritmetigi. Donanimdan ayrilmasinin nedeni: sinir
+   degerleri (127/128/255/256/257/512, bekleyen TC, UINT32 sarimi) gercek
+   DMA zamanlamasini yakalamaya calismadan sinanabilsin. Donanim sirasi bu
+   fonksiyonla KANITLANMAZ; onun icin ayri kart testi vardir.
+
+   pending_tc: tur bitti fakat ISR henuz wrap_base'i artirmadi.
+   ndtr      : 1..UART_RX_BUF_SIZE arasi gecerli tur ici kalan. */
+uint32_t uart_rx_producer_from(uint32_t wrap_base, uint8_t pending_tc,
+                               uint32_t ndtr)
+{
+    const uint32_t buf_size = UART_RX_BUF_SIZE;
+
+    return wrap_base + ((pending_tc != 0U) ? buf_size : 0U) +
+           (buf_size - ndtr);
+}
+
+
+/* Tutarli uretici ornegi (bolum 6.2).
+   Donus 0 ise *produced KULLANILMAZ: cagiran tuketiciyi ilerletmez.
+
+   Neden tek okuma yetmez: NDTR ile wrap_base farkli anlarda degisir. Tur
+   sinirinda once TCIF kalkar, sonra NDTR yeniden yuklenir, en son ISR
+   wrap_base'i artirir. Arada alinan bir ornek bir turu ya iki kez sayar ya
+   da hic saymaz. Bu yuzden TCIF ornegin ONCESINDE ve SONRASINDA okunur. */
+static uint8_t uart_rx_sample_producer(uint32_t *produced)
+{
+    const uint32_t buf_size = UART_RX_BUF_SIZE;
+    uint8_t  deneme;
+
+    if ((s_huart == NULL) || (s_huart->hdmarx == NULL) || (produced == NULL))
+    {
+        return 0U;
+    }
+
+#ifdef UART_COMM_TEST
+    if (s_force_sample_fail != 0U)
+    {
+        return 0U;                  /* surekli gecersiz NDTR taklidi */
+    }
+#endif
+
+    /* En fazla 3 kisa deneme: DMA'nin yeniden yukleme aninda sonsuz spin
+       yapmak, RX disindaki butun isleri (TX dahil) durdururdu. */
+    for (deneme = 0U; deneme < 3U; deneme++)
+    {
+        uint32_t pri;
+        uint32_t base;
+        uint32_t tc_once;
+        uint32_t tc_sonra;
+        uint32_t ndtr;
+
+        pri = rx_crit_enter();
+        base     = s_wrap_base;
+        tc_once  = rx_tcif_raw();
+        ndtr     = (uint32_t)__HAL_DMA_GET_COUNTER(s_huart->hdmarx);
+        tc_sonra = rx_tcif_raw();
+        rx_crit_exit(pri);
+        /* CPU burada ISR calistiramaz, ama DMA calismaya DEVAM eder:
+           kritik bolum NDTR'yi dondurmaz, yalnizca wrap_base'i sabitler. */
+
+        if (tc_once != tc_sonra)
+        {
+            continue;               /* tur sinirina denk geldik, tekrar dene */
+        }
+
+        if ((ndtr == 0U) || (ndtr > buf_size))
+        {
+            /* NDTR 0: yeniden yukleme penceresi. Gecerli bir tur ici konum
+               degil; 256 - 0 = 256 yazmak bir sonraki turu erken saydirirdi. */
+            continue;
+        }
+
+        /* Bekleyen TC: bayrak set ama ISR daha calismadi, yani bu tur
+           wrap_base'e HENUZ eklenmedi. Ornek fonksiyonu donanim bayragini
+           TEMIZLEMEZ ve wrap_base'e DOKUNMAZ; telafiyi yalnizca kendi
+           hesabinda yapar, sayimi ISR'ye birakir.
+
+           Tek yanlilik: TCIF'in kalkmasi ile NDTR'nin yeniden yuklenmesi
+           arasindaki cok kisa pencerede bir tur EKSIK sayilabilir. Yon
+           onemli: eksik saymak gecicidir ve sonraki ornek duzeltir; fazla
+           saymak uretici konumunu GERI sicratirdi. */
+        *produced = uart_rx_producer_from(base, (uint8_t)(tc_once != 0U),
+                                          ndtr);
+        return 1U;
+    }
+
+    return 0U;
+}
+
+
+/* Ornekleme basarisizliginin muhasebesi (bolum 6.2 adim 4).
+   Donus 1 ise RX saglik hatasi olusmustur ve toparlanmaya gidilmelidir. */
+static uint8_t rx_note_sample_fail(void)
+{
+    uint32_t now = HAL_GetTick();
+
+    if (s_sample_failing == 0U)
+    {
+        s_sample_failing   = 1U;
+        s_sample_fail_tick = now;
+    }
+
+    /* Tekrar 1 ms sonraya birakilir: bozuk NDTR yuzunden sinirsiz mesgul
+       dongu kurulmaz, RX disindaki isler calismaya devam eder. */
+    s_sample_retry_tick = now + 1U;
+    uart_rx_stats.sample_defers++;
+
+    return (uint8_t)((now - s_sample_fail_tick) >= UART_RX_SAMPLE_FAIL_MS);
+}
+
+
+static void rx_note_sample_ok(void)
+{
+    s_sample_failing = 0U;          /* gecerli ornek pencereyi kapatir */
+}
+
+
+/* Ornekleme ertelendiyse henuz zamani gelmemis olabilir. */
+static uint8_t rx_sample_deferred(void)
+{
+    if (s_sample_failing == 0U)
+    {
+        return 0U;
+    }
+    return (uint8_t)((int32_t)(HAL_GetTick() - s_sample_retry_tick) < 0);
 }
 
 
@@ -177,12 +384,17 @@ HAL_StatusTypeDef uart_rx_start(UART_HandleTypeDef *huart)
 
     /* --- Buradan sonrasi kabul edilmis kurulum --- */
     s_huart        = huart;
-    s_read_pos     = 0U;
     s_rx_pending   = 0U;
     s_rx_error     = 0U;
-    s_last_rx_tick = HAL_GetTick();
     s_recover_pending = 0U;
     s_restart_tries   = 0U;
+
+    /* Eski oturumun bekleyen TC bayragi yeni oturuma SIZMAMALI: donanim
+       durdu, ama TCIF set kalmis olabilir ve ilk ornek onu "bekleyen tur"
+       sanip 256 bayt ileri atlardi. */
+    __HAL_DMA_CLEAR_FLAG(huart->hdmarx,
+                         __HAL_DMA_GET_TC_FLAG_INDEX(huart->hdmarx));
+    rx_reset_progress_after_stop();
 
     /* Soguk kurulum yalnizca ilk kez: yeniden baslatma sayaclari silmez. */
     if (s_parser_ready == 0U)
@@ -357,8 +569,13 @@ static void uart_rx_recover(void)
        frame_parser_init DEGIL frame_parser_discard: sayaclar korunmali,
        yoksa hata gecmisi her toparlanmada silinir. */
     frame_parser_discard(&s_parser);
-    s_read_pos     = 0U;
-    s_last_rx_tick = HAL_GetTick();
+
+    /* R2: butun start/recover yollari AYNI ilerleme sifirlamasindan gecer.
+       Bir yol atlanirsa eski oturumun wrap_base'i yeni oturuma sizar ve
+       ilk ornek sahte tasma uretir. */
+    __HAL_DMA_CLEAR_FLAG(s_huart->hdmarx,
+                         __HAL_DMA_GET_TC_FLAG_INDEX(s_huart->hdmarx));
+    rx_reset_progress_after_stop();
 
     rx_set_phase(UART_RX_PHASE_STARTING);
 
@@ -435,10 +652,22 @@ static void check_frame_timeout(void)
        damgasina baksak akmakta olan gecerli bir cerceveden bayt atardik.
        Ilerlemis: cerceve hala geliyor -> zaman asimi yok, tuket.
        uart_rx_drain zaman damgasini da yeniler. */
-    if (dma_write_pos() != s_read_pos)
     {
-        uart_rx_drain();
-        return;
+        uint32_t produced;
+
+        /* Gecerli ornek alinamiyorsa zaman asimi KARARI VERILMEZ: ilerleme
+           olup olmadigini bilmeden aday dusurmek, akmakta olan gecerli bir
+           cerceveden bayt atmak demektir. */
+        if (uart_rx_sample_producer(&produced) == 0U)
+        {
+            return;
+        }
+
+        if (produced != s_consumed)
+        {
+            uart_rx_drain();
+            return;
+        }
     }
 
     frame_parser_timeout(&s_parser, frame_received, NULL);
@@ -447,67 +676,94 @@ static void check_frame_timeout(void)
 }
 
 
-/* DMA'nin yazacagi SONRAKI konum. Saklanan bir durum degil, NDTR'den
-   turetilen anlik deger; bu yuzden her cagrida yeniden okunur.
-   Cagiran s_huart'in NULL olmadigini garanti etmelidir. */
-static uint16_t dma_write_pos(void)
+uint8_t uart_rx_get_produced(uint32_t *out)
 {
-    const uint16_t buf_size = (uint16_t)sizeof(s_dma_buf);
+    return uart_rx_sample_producer(out);
+}
 
-    /* NDTR kalan transfer sayisini tutar ve her baytta azalir:
-          yazilan bayt sayisi = buf_size - NDTR
-       Modulo tek bir uc durum icin gerekli: DMA son bayti yazip NDTR'yi
-       henuz yeniden yuklemediginde 0 okunur, buf_size - 0 = buf_size cikar
-       ve bu gecersiz bir indekstir. Modulo onu 0'a cevirir. */
-    return (uint16_t)((buf_size -
-            (uint16_t)__HAL_DMA_GET_COUNTER(s_huart->hdmarx)) % buf_size);
+
+uint32_t uart_rx_get_consumed(void)
+{
+    return s_consumed;
 }
 
 
 void uart_rx_drain(void)
 {
-    const uint16_t buf_size = (uint16_t)sizeof(s_dma_buf);
-    uint16_t write_pos;
-    uint16_t chunk_len;
+    const uint32_t buf_size = UART_RX_BUF_SIZE;
+    uint32_t produced;
+    uint32_t available;
+    uint32_t chunk_len;
+    uint32_t read_idx;
 
     if (s_huart == NULL)
     {
         return;
     }
 
-    for (;;)
+    /* Ornekleme ertelenmisse zamani beklenir; erken tekrar bir mesgul
+       dongudur, tuketiciyi ilerletmez. */
+    if (rx_sample_deferred() != 0U)
     {
-        write_pos = dma_write_pos();
+        return;
+    }
 
-        if (write_pos == s_read_pos)
+    if (uart_rx_sample_producer(&produced) == 0U)
+    {
+        /* Gecerli ornek yok: tuketici ILERLETILMEZ ve ayristiriciya veri
+           verilmez. 20 ms boyunca duzelmezse saglik hatasi uretilir. */
+        if (rx_note_sample_fail() != 0U)
         {
-            /* Bekleyen veri yok.
-               DIKKAT: tam bir tur uzerine yazilmis olsa da konumlar boyle
-               gorunur. Modulo aritmetigi tasmayi tespit edemez; koruma
-               zamaninda tuketmektir (256 bayt / 11520 bayt/s ~ 22 ms). */
-            break;
+            uart_rx_stats.sample_fails++;
+            s_sample_failing = 0U;
+            s_rx_error       = 1U;      /* ortak RX toparlanma yoluna bagla */
+        }
+        return;
+    }
+
+    rx_note_sample_ok();
+
+    available = produced - s_consumed;   /* unsigned: sarimda da dogru */
+
+    if (available == 0U)
+    {
+        return;
+    }
+
+    /* Tam tur kaybi. Konservatif kabul: fark tampon boyuna ULASTIYSA guvenlik
+       payi bitmistir, okunmamis bayt fiziksel olarak henuz ezilmemis olsa da
+       dusurulur. Eski kodda bu durum "veri yok" gorunuyordu (modulo konumlar
+       esitlenirdi) ve kayip SESSIZ kaliyordu.
+       Politikanin tamami (ayristirici adayini birakma, yeniden senkron) R3'te
+       tamamlanacak; sayac burada kuruluyor ki kayip hicbir asamada gizli
+       kalmasin. */
+    if (available >= buf_size)
+    {
+        uart_rx_stats.overruns++;
+        uart_rx_stats.discarded_bytes += (available - buf_size) + 1U;
+        frame_parser_discard(&s_parser);
+        s_consumed = produced - (buf_size - 1U);
+        available  = buf_size - 1U;
+    }
+
+    /* Yeni bayt geldi: zaman asimi sayaci bastan baslar */
+    s_last_rx_tick = HAL_GetTick();
+
+    while (available > 0U)
+    {
+        read_idx  = s_consumed % buf_size;
+        chunk_len = buf_size - read_idx;      /* tampon sonuna kadar */
+
+        if (chunk_len > available)
+        {
+            chunk_len = available;
         }
 
-        /* Yeni bayt geldi: zaman asimi sayaci bastan baslar */
-        s_last_rx_tick = HAL_GetTick();
+        frame_parser_feed(&s_parser, &s_dma_buf[read_idx],
+                          (uint16_t)chunk_len, frame_received, NULL);
 
-        if (write_pos > s_read_pos)
-        {
-            /* Sarim yok: tek ardisik aralik */
-            chunk_len = (uint16_t)(write_pos - s_read_pos);
-            frame_parser_feed(&s_parser, &s_dma_buf[s_read_pos], chunk_len,
-                              frame_received, NULL);
-            s_read_pos = write_pos;
-        }
-        else
-        {
-            /* Sarim var: once tampon SONUNA kadar besle. Kalani dongunun
-               sonraki turu artik "sarim yok" durumu olarak halleder. */
-            chunk_len = (uint16_t)(buf_size - s_read_pos);
-            frame_parser_feed(&s_parser, &s_dma_buf[s_read_pos], chunk_len,
-                              frame_received, NULL);
-            s_read_pos = 0U;
-        }
+        s_consumed += chunk_len;
+        available  -= chunk_len;
     }
 }
 
@@ -542,6 +798,18 @@ void uart_rx_force_start_fail(uint8_t enable)
 void uart_rx_test_sync_error_on_start(uint8_t enable)
 {
     s_sync_error_on_start = enable;
+}
+
+
+void uart_rx_test_force_sample_fail(uint8_t enable)
+{
+    s_force_sample_fail = enable;
+}
+
+
+uint32_t uart_rx_test_get_wrap_base(void)
+{
+    return s_wrap_base;
 }
 
 #endif /* UART_COMM_TEST */
@@ -598,16 +866,36 @@ static void frame_received(const frame_info_t *info, void *user_data)
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
+    /* Olay turu callback'in EN BASINDA yerel degiskene alinir: huart
+       uzerindeki RxEventType paylasilan bir alandir ve sonraki HAL isleri
+       onu degistirebilir. */
+    HAL_UART_RxEventTypeTypeDef type = HAL_UARTEx_GetRxEventType(huart);
+
     if ((s_huart != NULL) && (huart->Instance == s_huart->Instance))
     {
         uart_rx_stats.rx_events++;
         uart_rx_stats.last_size = Size;
 
         /* Size mutlak konum bildirir, "kac yeni bayt" degil. Tuketimde
-           KULLANILMAZ; konumu uart_rx_drain kendisi NDTR'den hesaplar. */
+           KULLANILMAZ; konumu uretici ornegi NDTR'den hesaplar.
+           IDLE yolu sarim sinirinda Size == 256 bildirebilir ama turu
+           IDLE'dir: Size toplamak bir turu iki kez saydirirdi. */
         s_rx_pending = 1U;
 
-        switch (HAL_UARTEx_GetRxEventType(huart))
+        /* --- R2: GERCEK tur sayaci ---
+           wrap_base yalnizca HAL_UART_RXEVENT_TC turunde artar. HT ve IDLE
+           yalnizca bildirim/istatistik uretir.
+           Oturum kontrolu: STARTING/RUNNING disindaki (ornegin abort
+           sirasinda olusan) bir TC normal uretime EKLENMEZ; aksi halde
+           iptal edilen bir oturumun turu yeni oturumu ileri sicratirdi. */
+        if ((type == HAL_UART_RXEVENT_TC) &&
+            ((s_phase == UART_RX_PHASE_RUNNING) ||
+             (s_phase == UART_RX_PHASE_STARTING)))
+        {
+            s_wrap_base += UART_RX_BUF_SIZE;
+        }
+
+        switch (type)
         {
             case HAL_UART_RXEVENT_IDLE:
                 uart_rx_stats.idle_events++;
