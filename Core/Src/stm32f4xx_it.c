@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "uart_rx.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -238,7 +239,13 @@ void USART2_IRQHandler(void)
   /* USER CODE END USART2_IRQn 0 */
   HAL_UART_IRQHandler(&huart2);
   /* USER CODE BEGIN USART2_IRQn 1 */
-
+  /* R4: HAL kendi islemini BITIRDIKTEN SONRA alim sagligi kontrol edilir.
+     Gerekcesi: bu HAL, DMA RX etkinken FE/NE/PE dahil alim hatalarini
+     durdurucu yoldan isleyebiliyor; "FE alimi durdurmaz" genellemesi bu
+     yapi icin dogru degil. ErrorCallback gecikse veya hic gelmese bile
+     alimin durdugu bu kancadan gorulur.
+     Kanca YALNIZCA kayit yapar; toparlanma karari tuketici baglamindadir. */
+  uart_rx_on_uart_irq_exit();
   /* USER CODE END USART2_IRQn 1 */
 }
 

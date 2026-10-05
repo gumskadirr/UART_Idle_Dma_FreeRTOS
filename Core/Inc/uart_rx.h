@@ -43,6 +43,21 @@
 /* Ayristiriciya verilen her parcanin kopyalandigi calisma tamponunun boyu.
    Parca kucuk tutuluyor: kopya ile dogrulama arasindaki pencere ne kadar
    kisa olursa, DMA'nin o araligi ezmis olma ihtimali o kadar dusuk. */
+/* Durdurma icin ayrilan en uzun sure. Dolunca durus DOGRULANAMAMIS sayilir
+   ve FAULT'a gecilir; tampon kilitli kalir. */
+#define UART_RX_ABORT_TIMEOUT_MS   20U
+
+/* Bir toparlanma doneminde YENI START denemeleri icin ayrilan sure. Dolunca
+   yeni start yapilmaz; gerekiyorsa son durdurma icin 20 ms daha kullanilir.
+   Boylece toplam islem suresi servis gecikmesi haric en fazla ~120 ms. */
+#define UART_RX_RECOVERY_BUDGET_MS 100U
+
+/* RUNNING'de bu kadar HATASIZ sure gecince toparlanma donemi kapanir.
+   Donem kapandiktan sonra gelen hata YENI bir donemdir: saniyelerce
+   saglikli calismis bir hat, eski donemin suresi yuzunden aninda FAULT
+   olmaz. */
+#define UART_RX_HEALTHY_MS        100U
+
 #define UART_RX_SCRATCH_SIZE       32U
 
 /* Bir servis turunda ayristiriciya verilecek EN FAZLA bayt. Sinirsiz drain
@@ -85,6 +100,7 @@ typedef struct
     volatile uint16_t tc_events;      /* tam tampon */
     volatile uint16_t last_size;      /* callback'in bildirdigi Size (MUTLAK KONUM) */
     volatile uint16_t error_events;   /* UART hata callback sayisi */
+    volatile uint16_t abort_complete_events; /* RX abort tamamlanma callback'i */
     volatile uint32_t last_error;     /* ORE/FE/NE/PE bit maskesi */
 
     /* Asagidakiler yalnizca main baglaminda yazilir: volatile gerekmez */
@@ -120,6 +136,18 @@ typedef struct
        VERILMEDI. Sifirdan buyuk olmasi veri kaybi anlamina gelmez;
        surekli artmasi tuketicinin DMA'ya yetisemedigini gosterir. */
     uint16_t copy_rejects;
+
+    /* --- R4 ---
+       abort_start_fails : HAL_UART_AbortReceive_IT HAL_OK donmedi
+       recovery_fails    : durus DOGRULANAMADAN FAULT'a gecildi (tampon
+                           kilitli kaldi). Bu, "kac hata oldu" degil
+                           "toparlanma yolunun KENDISI cokuyor mu" sorusunun
+                           cevabidir; tek sayacta toplanirsa ayirt edilemez.
+       irq_health_events : UART IRQ cikisinda saglıksiz bulunan oturum
+                           sayisi (ayni oturumun tekrari birlestirilir). */
+    uint16_t abort_start_fails;
+    uint16_t recovery_fails;
+    uint16_t irq_health_events;
 
     /* UART_RX_RESTART_MAX_TRIES denemede toparlanamadi: ALIM DURDU.
        Sessizce olmek yerine gorunur olmek icin var. Cikis yolu yalnizca
@@ -180,6 +208,24 @@ uint32_t uart_rx_get_consumed(void);
    oldugu icin sinir degerleri dogrudan sinanabilir. */
 uint32_t uart_rx_producer_from(uint32_t wrap_base, uint8_t pending_tc,
                                uint32_t ndtr);
+
+/* --- R4: kesme tarafinin RX kapilari ---
+   Ucu de YALNIZCA kayit yapar; durum gecisi ve HAL cagrisi tuketici
+   baglamina aittir. uart_rx_on_uart_irq_exit, HAL_UART_IRQHandler
+   DONDUKTEN SONRA stm32f4xx_it.c USER CODE alanindan cagrilir: hata
+   callback'i gecikse bile saglik bozulmasi bu yoldan gorulur. */
+void uart_rx_on_error(UART_HandleTypeDef *huart, uint32_t error);
+void uart_rx_on_abort_complete(UART_HandleTypeDef *huart);
+void uart_rx_on_uart_irq_exit(void);
+
+/* FAULT'tan cikis icin ACIK kurtarma istegi. Donus 1 istegin KAYDIDIR,
+   basarili toparlanma DEGIL: owner once durusu dogrular. FAULT disindaki
+   durumlarda 0 doner ve calisan alima dokunulmaz. */
+uint8_t uart_rx_request_recovery(void);
+
+/* Durusun DOGRULANDIGI bilgisi. FAULT olmasi durdugu anlamina gelmez;
+   bu iki bilgi bilerek ayri tutulur. 0 iken DMA tamponu KILITLIDIR. */
+uint8_t uart_rx_is_quiescent(void);
 
 /* Alim durum makinesinin o anki durumu. stats.faulted yalnizca
    "phase == UART_RX_PHASE_FAULT" bilgisini tasir; ayrinti buradadir. */
@@ -244,6 +290,10 @@ uint32_t uart_rx_test_get_wrap_base(void);
 
 void uart_rx_test_set_copy_hook(uint8_t hook);
 uint32_t uart_rx_test_get_session(void);
+
+/* --- R4 kancalari --- */
+uint8_t uart_rx_test_get_restart_tries(void);
+uint8_t uart_rx_test_recovery_active(void);
 
 /* --- R1 kancalari ---
    Gercek donanimda "ReceiveToIdle_DMA basarisiz oldu" durumunu guvenilir

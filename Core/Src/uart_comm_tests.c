@@ -1263,6 +1263,381 @@ static uint8_t r3_tasma_sonrasi_senkron(UART_HandleTypeDef *huart)
 }
 
 
+/* ==================== R4: bloklamayan RX toparlanmasi ================== */
+
+/* RX_ERROR_DMA_FE
+   Gercek bir framing error sonrasi alim kendi kendine geri gelmeli ve
+   cerceve teslim etmeli. Hata FIZIKSEL: SBK hatta break gonderir. */
+static uint8_t r4_fe_sonrasi_toparlanma(UART_HandleTypeDef *huart)
+{
+    uint8_t  cerceve[FRAME_MAX_SIZE];
+    uint8_t  n;
+    uint16_t err_once;
+    uint16_t ok_once;
+    uint32_t t0;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    err_once = uart_rx_stats.error_events;
+
+    SET_BIT(huart->Instance->CR1, USART_CR1_SBK);
+
+    /* Toparlanma BLOKLAMAMALI: her servis turu bir adim ilerletir.
+       Toplam sure abort (<=20 ms) + denemeler (<=100 ms) icinde kalmali. */
+    t0 = HAL_GetTick();
+    while (((HAL_GetTick() - t0) < 200U) &&
+           (uart_rx_get_phase() != UART_RX_PHASE_RUNNING))
+    {
+        uart_rx_service();
+    }
+
+    if ((uart_rx_stats.error_events <= err_once) ||
+        (uart_rx_get_phase() != UART_RX_PHASE_RUNNING))
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    /* ASIL IDDIA: toparlanmadan sonra alim calisiyor */
+    ok_once = uart_rx_get_parser()->frames_ok;
+    n = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve), 11, -11, 901U);
+    if ((n == 0U) ||
+        (HAL_UART_Transmit(huart, cerceve, n, 100U) != HAL_OK))
+    {
+        return 0U;
+    }
+    HAL_Delay(3U);
+    uart_rx_service();
+    uart_rx_service();
+
+    return (uint8_t)((uart_rx_get_parser()->frames_ok >
+                      ok_once) &&
+                     (uart_rx_state.last_seq == 901U));
+}
+
+
+/* RX_RETRY_EXHAUSTED
+   5 start denemesi / 100 ms butcesi yeni denemeleri KAPATMALI ve gorunur
+   FAULT uretmeli. Durus saglandigi icin rx_quiescent 1 olmali. */
+static uint8_t r4_deneme_butcesi_dolar(UART_HandleTypeDef *huart)
+{
+    uint16_t rf_once;
+    uint32_t t0;
+    uint8_t  sonuc;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    rf_once = uart_rx_stats.restart_fails;
+
+    uart_rx_force_restart_fail(1U);
+    uart_rx_test_inject_error();
+
+    /* 200 ms: abort + 5 x 5 ms deneme + 100 ms butce icin fazlasiyla yeterli.
+       Bloklayan bir akis olsaydi bu dongu hic donmezdi. */
+    t0 = HAL_GetTick();
+    while (((HAL_GetTick() - t0) < 200U) &&
+           (uart_rx_get_phase() != UART_RX_PHASE_FAULT))
+    {
+        uart_rx_service();
+    }
+    uart_rx_force_restart_fail(0U);
+
+    sonuc = (uint8_t)((uart_rx_get_phase() == UART_RX_PHASE_FAULT) &&
+                      (uart_rx_stats.faulted == 1U) &&
+                      (uart_rx_stats.restart_fails >=
+                       (uint16_t)(rf_once + UART_RX_RESTART_MAX_TRIES)) &&
+                      (uart_rx_is_quiescent() == 1U));
+
+    /* FAULT'ta yeni deneme OLMAMALI: 50 ms daha servis dondur, sayac sabit. */
+    {
+        uint16_t rf_fault = uart_rx_stats.restart_fails;
+
+        t0 = HAL_GetTick();
+        while ((HAL_GetTick() - t0) < 50U)
+        {
+            uart_rx_service();
+        }
+        if (uart_rx_stats.restart_fails != rf_fault)
+        {
+            sonuc = 0U;
+        }
+    }
+
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        sonuc = 0U;
+    }
+    return sonuc;
+}
+
+
+/* RX_ERROR_EACH_RESTART
+   Her denemede yeni hata bildirimi gelse bile deneme sayaci BASA DONMEMELI.
+   Eski kodda her hata s_restart_tries'i sifirliyordu ve FAULT'a hic
+   ulasilamiyordu; bu testin yakaladigi hata tam olarak budur. */
+static uint8_t r4_her_denemede_hata(UART_HandleTypeDef *huart)
+{
+    uint32_t t0;
+    uint8_t  sonuc;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    uart_rx_force_restart_fail(1U);
+    uart_rx_test_inject_error();
+
+    /* Her turda YENI hata enjekte et: butce yine de dolmali. */
+    t0 = HAL_GetTick();
+    while (((HAL_GetTick() - t0) < 300U) &&
+           (uart_rx_get_phase() != UART_RX_PHASE_FAULT))
+    {
+        uart_rx_test_inject_error();
+        uart_rx_service();
+    }
+    uart_rx_force_restart_fail(0U);
+
+    sonuc = (uint8_t)(uart_rx_get_phase() == UART_RX_PHASE_FAULT);
+
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        sonuc = 0U;
+    }
+    return sonuc;
+}
+
+
+/* RX_NEW_ERROR_AFTER_HEALTHY_IDLE
+   Saglikli sessizlikten sonra gelen hata YENI bir donem acmali; onceki
+   donemin suresi yuzunden aninda FAULT olmamali. Periyodik uyanma
+   gerektirmeden calismali. */
+static uint8_t r4_saglikli_sessizlik_sonrasi(UART_HandleTypeDef *huart)
+{
+    uint32_t t0;
+    uint8_t  sonuc;
+
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        return 0U;
+    }
+
+    /* UART_RX_HEALTHY_MS'in cok uzerinde hatasiz calisma: donem kapanmali.
+       (Plandaki 2 saniye yerine 400 ms kullaniliyor; kapanma kosulu 100 ms
+       oldugu icin ayni seyi kanitlar ve test suresini kisa tutar.) */
+    t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < 400U)
+    {
+        uart_rx_service();
+    }
+
+    if (uart_rx_test_recovery_active() != 0U)
+    {
+        return 0U;                  /* donem kapanmis olmaliydi */
+    }
+
+    /* Simdi tek bir hata: ANINDA FAULT OLMAMALI, yeni donem acilmali. */
+    uart_rx_test_inject_error();
+    uart_rx_service();
+
+    if (uart_rx_get_phase() == UART_RX_PHASE_FAULT)
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    /* Toparlanma tamamlanip RUNNING'e donmeli */
+    t0 = HAL_GetTick();
+    while (((HAL_GetTick() - t0) < 200U) &&
+           (uart_rx_get_phase() != UART_RX_PHASE_RUNNING))
+    {
+        uart_rx_service();
+    }
+
+    sonuc = (uint8_t)(uart_rx_get_phase() == UART_RX_PHASE_RUNNING);
+
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        sonuc = 0U;
+    }
+    return sonuc;
+}
+
+
+/* RX_FAULT_RECOVERY_REQUEST
+   FAULT'tan cikis ACIK istekle olmali; istek once DURUSU dogrulamali.
+   Calisan bir alim varken istek kabul EDILMEMELI. */
+static uint8_t r4_kurtarma_istegi(UART_HandleTypeDef *huart)
+{
+    uint32_t t0;
+    uint8_t  sonuc;
+
+    /* RUNNING iken istek reddedilmeli: calisan yone dokunulmaz */
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        return 0U;
+    }
+    if (uart_rx_request_recovery() != 0U)
+    {
+        return 0U;
+    }
+
+    /* FAULT'a dusur */
+    if (r1_fault_ve_durdur(huart) == 0U)
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    /* Istek olmadan FAULT'ta kalmali */
+    t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < 30U)
+    {
+        uart_rx_service();
+    }
+    if (uart_rx_get_phase() != UART_RX_PHASE_FAULT)
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    /* Acik istek: toparlanma islemeli */
+    if (uart_rx_request_recovery() == 0U)
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    t0 = HAL_GetTick();
+    while (((HAL_GetTick() - t0) < 200U) &&
+           (uart_rx_get_phase() != UART_RX_PHASE_RUNNING))
+    {
+        uart_rx_service();
+    }
+
+    sonuc = (uint8_t)(uart_rx_get_phase() == UART_RX_PHASE_RUNNING);
+
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        sonuc = 0U;
+    }
+    return sonuc;
+}
+
+
+/* RX_FAULT_TX_IRQ_NO_RETRY
+   FAULT sirasinda SAGLIKLI TX tamamlanmalari RX'te yeni otomatik deneme
+   baslatmamali. IRQ cikis kancasi RUNNING/STARTING disinda sessiz kalir;
+   aksi halde her TX TC kesmesi RX butcesini sonsuza kadar tazelerdi. */
+static uint8_t r4_tx_irq_yeni_deneme_acmaz(UART_HandleTypeDef *huart)
+{
+    uint16_t rf_once;
+    uint16_t health_once;
+    uint8_t  cerceve[FRAME_OVERHEAD + 4U];
+    uint8_t  n;
+    uint8_t  sonuc;
+    uint32_t t0;
+
+    if (r1_fault_ve_durdur(huart) == 0U)
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    rf_once     = uart_rx_stats.restart_fails;
+    health_once = uart_rx_stats.irq_health_events;
+
+    /* FAULT'ta RX dururken TX gonderimi yap: USART IRQ'su ORTAK oldugu icin
+       her TX olayi RX IRQ cikis kancasini da tetikler. */
+    n = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve), 1, 1, 950U);
+    if (n == 0U)
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    if (uart_tx_send_copy(cerceve, n) == UART_TX_OK)
+    {
+        t0 = HAL_GetTick();
+        while (((HAL_GetTick() - t0) < 50U) &&
+               (uart_tx_get_state() != UART_TX_IDLE))
+        {
+            uart_tx_service();
+            uart_rx_service();
+        }
+    }
+
+    t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < 30U)
+    {
+        uart_rx_service();
+    }
+
+    sonuc = (uint8_t)((uart_rx_get_phase() == UART_RX_PHASE_FAULT) &&
+                      (uart_rx_stats.restart_fails == rf_once) &&
+                      (uart_rx_stats.irq_health_events == health_once));
+
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        sonuc = 0U;
+    }
+    return sonuc;
+}
+
+
+/* RX_NON_RUNNING_NO_PARSER
+   RUNNING disindayken parser/drain/timeout CALISMAMALI: durmus ya da
+   belirsiz bir DMA'nin tamponunu ayristiriciya vermek, kurtarilmis gibi
+   gorunen bozuk cerceveler uretir. */
+static uint8_t r4_running_disi_tuketim_yok(UART_HandleTypeDef *huart)
+{
+    uint32_t c_once;
+    uint16_t ok_once;
+    uint16_t to_once;
+    uint32_t t0;
+    uint8_t  sonuc;
+
+    if (r1_fault_ve_durdur(huart) == 0U)
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    c_once  = uart_rx_get_consumed();
+    ok_once = uart_rx_get_parser()->frames_ok;
+    to_once = uart_rx_stats.frame_timeouts;
+
+    /* FAULT'ta butce cagrisi hicbir sey tuketmemeli */
+    if (uart_rx_service_budget(UART_RX_SERVICE_BUDGET) != 0U)
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    t0 = HAL_GetTick();
+    while ((HAL_GetTick() - t0) < 80U)   /* 50 ms zaman asimi siniri gecsin */
+    {
+        uart_rx_service();
+    }
+
+    sonuc = (uint8_t)((uart_rx_get_consumed() == c_once) &&
+                      (uart_rx_get_parser()->frames_ok == ok_once) &&
+                      (uart_rx_stats.frame_timeouts == to_once));
+
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        sonuc = 0U;
+    }
+    return sonuc;
+}
+
+
 void uart_comm_tests_run(UART_HandleTypeDef *huart)
 {
     uint16_t i_not_run;
@@ -1289,6 +1664,13 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
     uint16_t i_r3_ezilme;
     uint16_t i_r3_p1dustu;
     uint16_t i_r3_senkron;
+    uint16_t i_r4_fe;
+    uint16_t i_r4_butce;
+    uint16_t i_r4_herhata;
+    uint16_t i_r4_sessizlik;
+    uint16_t i_r4_istek;
+    uint16_t i_r4_txirq;
+    uint16_t i_r4_norun;
     uint8_t  hw;
 
     ctx_kur(&s_ctx, uart_comm_test_kayit, UART_COMM_TEST_MAX);
@@ -1330,6 +1712,14 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
     i_r3_p1dustu = uart_comm_test_kaydet("RX_POST_COPY_SAMPLE_FAIL",  3U, 1U);
     i_r3_senkron = uart_comm_test_kaydet("RX_RESYNC_AFTER_OVERRUN",   3U, 1U);
 
+    i_r4_fe        = uart_comm_test_kaydet("RX_ERROR_DMA_FE",              4U, 1U);
+    i_r4_butce     = uart_comm_test_kaydet("RX_RETRY_EXHAUSTED",           4U, 1U);
+    i_r4_herhata   = uart_comm_test_kaydet("RX_ERROR_EACH_RESTART",        4U, 1U);
+    i_r4_sessizlik = uart_comm_test_kaydet("RX_NEW_ERROR_AFTER_HEALTHY_IDLE",4U,1U);
+    i_r4_istek     = uart_comm_test_kaydet("RX_FAULT_RECOVERY_REQUEST",    4U, 1U);
+    i_r4_txirq     = uart_comm_test_kaydet("RX_FAULT_TX_IRQ_NO_RETRY",     4U, 1U);
+    i_r4_norun     = uart_comm_test_kaydet("RX_NON_RUNNING_NO_PARSER",     4U, 1U);
+
     uart_comm_test_bool(i_not_run, p0_not_run_baslangici());
     uart_comm_test_bool(i_engel,   p0_not_run_basariyi_engeller());
     uart_comm_test_bool(i_cift,    p0_cift_sonuc_fail());
@@ -1369,7 +1759,7 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
     if (hw == 0U)
     {
         uint16_t i;
-        for (i = i_r1_busy; i <= i_r3_senkron; i++)
+        for (i = i_r1_busy; i <= i_r4_norun; i++)
         {
             if ((i == i_r2_sinir) || (i == i_r2_pendtc) || (i == i_r2_sarim))
             {
@@ -1431,6 +1821,42 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
                          (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
 
     uart_comm_test_bool(i_r3_senkron, r3_tasma_sonrasi_senkron(huart));
+
+    /* --- R4 --- */
+    uart_comm_test_sonuc(i_r4_fe,
+                         (uint8_t)(r4_fe_sonrasi_toparlanma(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_PHYSICAL, 0U, 0U);
+
+    uart_comm_test_sonuc(i_r4_butce,
+                         (uint8_t)(r4_deneme_butcesi_dolar(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
+
+    uart_comm_test_sonuc(i_r4_herhata,
+                         (uint8_t)(r4_her_denemede_hata(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
+
+    uart_comm_test_sonuc(i_r4_sessizlik,
+                         (uint8_t)(r4_saglikli_sessizlik_sonrasi(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
+
+    uart_comm_test_sonuc(i_r4_istek,
+                         (uint8_t)(r4_kurtarma_istegi(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
+
+    uart_comm_test_sonuc(i_r4_txirq,
+                         (uint8_t)(r4_tx_irq_yeni_deneme_acmaz(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
+
+    uart_comm_test_sonuc(i_r4_norun,
+                         (uint8_t)(r4_running_disi_tuketim_yok(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
 }
 
 #endif /* UART_COMM_TEST */
