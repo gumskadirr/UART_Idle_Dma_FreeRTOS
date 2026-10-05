@@ -1,0 +1,26 @@
+# STM32CubeIDE derleme cikislari
+/Debug/
+/Release/
+
+# Derleyici ara dosyalari
+*.o
+*.d
+*.su
+*.cyclo
+*.map
+*.list
+*.elf
+*.bin
+*.hex
+
+# Isletim sistemi
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Calisma alani (superpowers ledger/brief)
+/.superpowers/
