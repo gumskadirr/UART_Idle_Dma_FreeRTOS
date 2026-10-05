@@ -885,6 +885,384 @@ static uint8_t r2_tc_idle_ayni_konum(UART_HandleTypeDef *huart)
 }
 
 
+/* ==================== R3: tasma, guvenli scratch, servis butcesi =======
+   Hepsi kart gerektirir: sinanan sey tuketici ile CALISAN DMA arasindaki
+   yaris ve kaybin gorunurlugu. */
+
+/* Ayristiriciyi tetiklemeyen dolgu: hicbiri SYNC0 degil, hepsi elenir.
+   Amac tampon konumunu ilerletmek, cerceve uretmek degil. */
+static uint8_t r3_dolgu[64];
+
+static void r3_dolgu_hazirla(void)
+{
+    uint16_t i;
+    for (i = 0U; i < sizeof(r3_dolgu); i++)
+    {
+        r3_dolgu[i] = 0x11U;         /* FRAME_SYNC0 (0xAA) DEGIL */
+    }
+}
+
+
+/* n bayt gonderir ve bu sirada HIC tuketim yapmaz: HAL_UART_Transmit
+   bloklayicidir, kesmeler acik kalir (tur sayaci islemeye devam eder). */
+static uint8_t r3_tuketmeden_gonder(UART_HandleTypeDef *huart, uint32_t n)
+{
+    uint32_t kalan = n;
+
+    while (kalan > 0U)
+    {
+        uint16_t blok = (uint16_t)((kalan > sizeof(r3_dolgu))
+                                   ? sizeof(r3_dolgu) : kalan);
+        if (HAL_UART_Transmit(huart, r3_dolgu, blok, 200U) != HAL_OK)
+        {
+            return 0U;
+        }
+        kalan -= blok;
+    }
+    HAL_Delay(2U);                   /* son IDLE/TC olayi otursun */
+    return 1U;
+}
+
+
+/* RX_FULL_LAP_LOSS_VISIBLE
+   TAM 256 ve 300 bayt AYRI AYRI tasma saymali. Eski modulo konumla 256
+   bayt "veri yok" gorunuyordu: kaybin tamamen gizlendigi durum buydu. */
+static uint8_t r3_tam_tur_kaybi_gorunur(UART_HandleTypeDef *huart)
+{
+    uint16_t ovr_once;
+    uint32_t disc_once;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    r3_dolgu_hazirla();
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);   /* temiz baslangic */
+
+    /* --- TAM 256 --- */
+    ovr_once  = uart_rx_stats.overruns;
+    disc_once = uart_rx_stats.discarded_bytes;
+
+    if (r3_tuketmeden_gonder(huart, UART_RX_BUF_SIZE) == 0U)
+    {
+        return 0U;
+    }
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    if ((uart_rx_stats.overruns != (uint16_t)(ovr_once + 1U)) ||
+        (uart_rx_stats.discarded_bytes <= disc_once))
+    {
+        return 0U;
+    }
+
+    /* --- 300 --- */
+    ovr_once  = uart_rx_stats.overruns;
+    disc_once = uart_rx_stats.discarded_bytes;
+
+    if (r3_tuketmeden_gonder(huart, 300U) == 0U)
+    {
+        return 0U;
+    }
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    return (uint8_t)((uart_rx_stats.overruns == (uint16_t)(ovr_once + 1U)) &&
+                     (uart_rx_stats.discarded_bytes > disc_once));
+}
+
+
+/* RX_MULTILAP
+   768 bayt (tam uc tur) da sessiz "bos sonuc" uretmemeli. */
+static uint8_t r3_cok_tur(UART_HandleTypeDef *huart)
+{
+    uint16_t ovr_once;
+    uint32_t disc_once;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    r3_dolgu_hazirla();
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    ovr_once  = uart_rx_stats.overruns;
+    disc_once = uart_rx_stats.discarded_bytes;
+
+    if (r3_tuketmeden_gonder(huart, 768U) == 0U)
+    {
+        return 0U;
+    }
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    return (uint8_t)((uart_rx_stats.overruns == (uint16_t)(ovr_once + 1U)) &&
+                     ((uart_rx_stats.discarded_bytes - disc_once) >=
+                      (2U * UART_RX_BUF_SIZE)));
+}
+
+
+/* RX_BUDGET_REMAINS
+   100 bayt beklerken ilk tur EN FAZLA 64 tuketmeli ve "is kaldi" demeli;
+   yeni bir kesme OLMADAN sonraki tur kalani bitirmeli. */
+static uint8_t r3_butce_kalani(UART_HandleTypeDef *huart)
+{
+    uint32_t c0;
+    uint32_t c1;
+    uint32_t c2;
+    uint8_t  devam1;
+    uint8_t  devam2;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    r3_dolgu_hazirla();
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    /* 100 bayt: butceden (64) buyuk, tampondan (256) kucuk */
+    if (r3_tuketmeden_gonder(huart, 100U) == 0U)
+    {
+        return 0U;
+    }
+
+    c0     = uart_rx_get_consumed();
+    devam1 = uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+    c1     = uart_rx_get_consumed();
+
+    /* Ilk tur: en fazla butce kadar ve "is kaldi" */
+    if (((c1 - c0) > UART_RX_SERVICE_BUDGET) || (devam1 == 0U))
+    {
+        return 0U;
+    }
+
+    /* Ikinci tur: YENI KESME OLMADAN kalani bitirsin */
+    devam2 = uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+    c2     = uart_rx_get_consumed();
+
+    return (uint8_t)(((c2 - c0) == 100U) && (devam2 == 0U));
+}
+
+
+/* RX_OVERWRITE_DURING_COPY
+   Kopya ile dogrulama arasinda uretici bir tur sicrarsa kopya
+   ayristiriciya VERILMEMELI: tuketici ilerlemez, handler cagrilmaz.
+   Ayni kontrol hata nesli degisimi icin de yapilir. */
+static uint8_t r3_kopya_sirasinda_ezilme(UART_HandleTypeDef *huart)
+{
+    uint32_t c_once;
+    uint16_t ok_once;
+    uint16_t red_once;
+    uint8_t  cerceve[FRAME_MAX_SIZE];
+    uint8_t  n;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    /* Gecerli bir cerceve gonder: kopya dogrulanmazsa COZULMEMELI */
+    n = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve), 9, -9, 801U);
+    if (n == 0U)
+    {
+        return 0U;
+    }
+    if (HAL_UART_Transmit(huart, cerceve, n, 100U) != HAL_OK)
+    {
+        return 0U;
+    }
+    HAL_Delay(3U);
+
+    /* --- 1) Uretici kopya sirasinda bir tur sicriyor --- */
+    c_once   = uart_rx_get_consumed();
+    ok_once  = uart_rx_get_parser()->frames_ok;
+    red_once = uart_rx_stats.copy_rejects;
+
+    uart_rx_test_set_copy_hook(UART_RX_COPY_HOOK_OVERWRITE);
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    if ((uart_rx_get_consumed() != c_once) ||
+        (uart_rx_get_parser()->frames_ok != ok_once) ||
+        (uart_rx_stats.copy_rejects != (uint16_t)(red_once + 1U)))
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    /* Sahte sicrama kalici: oturumu temiz bir noktadan yeniden kur. */
+    r1_alimi_durdur(huart);
+    if (r1_alimi_kur(huart) == 0U)
+    {
+        return 0U;
+    }
+
+    /* --- 2) Kopya sirasinda hata nesli degisiyor --- */
+    n = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve), 8, -8, 802U);
+    if ((n == 0U) ||
+        (HAL_UART_Transmit(huart, cerceve, n, 100U) != HAL_OK))
+    {
+        return 0U;
+    }
+    HAL_Delay(3U);
+
+    c_once   = uart_rx_get_consumed();
+    ok_once  = uart_rx_get_parser()->frames_ok;
+    red_once = uart_rx_stats.copy_rejects;
+
+    uart_rx_test_set_copy_hook(UART_RX_COPY_HOOK_ERROR_GEN);
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    if ((uart_rx_get_consumed() != c_once) ||
+        (uart_rx_get_parser()->frames_ok != ok_once) ||
+        (uart_rx_stats.copy_rejects != (uint16_t)(red_once + 1U)))
+    {
+        (void)r1_alimi_kur(huart);
+        return 0U;
+    }
+
+    /* Kanca kapandi: ayni veri bu kez normal cozulmeli (veri kaybolmadi) */
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    return (uint8_t)((uart_rx_get_parser()->frames_ok ==
+                      (uint16_t)(ok_once + 1U)) &&
+                     (uart_rx_state.last_seq == 802U));
+}
+
+
+/* RX_POST_COPY_SAMPLE_FAIL
+   P0 gecerli, P1 BASARISIZ: eski/ilklenmemis P1 degeri KULLANILMAMALI.
+   Tuketici ayni kalmali, handler cagrilmamali ve tekrar son tarihine
+   kadar mesgul dongu olusmamali. */
+static uint8_t r3_kopya_sonrasi_ornek_dustu(UART_HandleTypeDef *huart)
+{
+    uint32_t c_once;
+    uint16_t ok_once;
+    uint16_t defers_once;
+    uint8_t  cerceve[FRAME_MAX_SIZE];
+    uint8_t  n;
+    uint8_t  devam;
+    uint8_t  sonuc;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    n = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve), 4, -4, 803U);
+    if ((n == 0U) ||
+        (HAL_UART_Transmit(huart, cerceve, n, 100U) != HAL_OK))
+    {
+        return 0U;
+    }
+    HAL_Delay(3U);
+
+    c_once      = uart_rx_get_consumed();
+    ok_once     = uart_rx_get_parser()->frames_ok;
+    defers_once = uart_rx_stats.sample_defers;
+
+    uart_rx_test_set_copy_hook(UART_RX_COPY_HOOK_SAMPLE_FAIL);
+    devam = uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    sonuc = (uint8_t)((uart_rx_get_consumed() == c_once) &&
+                      (uart_rx_get_parser()->frames_ok == ok_once) &&
+                      (devam == 0U) &&      /* spin cagrisi yapilmaz */
+                      (uart_rx_stats.sample_defers > defers_once));
+
+    /* Erteleme suresi dolmadan yapilan cagri hicbir sey tuketmemeli */
+    if (uart_rx_service_budget(UART_RX_SERVICE_BUDGET) != 0U)
+    {
+        sonuc = 0U;
+    }
+    if (uart_rx_get_consumed() != c_once)
+    {
+        sonuc = 0U;
+    }
+
+    /* Kanca kapali; erteleme dolunca ayni veri normal cozulmeli */
+    uart_rx_test_force_sample_fail(0U);
+    HAL_Delay(3U);
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    if ((uart_rx_get_parser()->frames_ok != (uint16_t)(ok_once + 1U)) ||
+        (uart_rx_state.last_seq != 803U))
+    {
+        sonuc = 0U;
+    }
+    return sonuc;
+}
+
+
+/* RX_RESYNC_AFTER_OVERRUN
+   Tasmadan sonra gelen gecerli cerceve YALNIZCA BIR KEZ teslim edilmeli ve
+   onceki yarim cerceveye EKLENMEMELI. */
+static uint8_t r3_tasma_sonrasi_senkron(UART_HandleTypeDef *huart)
+{
+    uint8_t  cerceve[FRAME_MAX_SIZE];
+    uint8_t  n;
+    uint16_t ok_once;
+    uint16_t ovr_once;
+
+    if (uart_rx_get_phase() != UART_RX_PHASE_RUNNING)
+    {
+        return 0U;
+    }
+
+    r3_dolgu_hazirla();
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    /* Yarim cerceve birak: tasma bunu DUSURMELI */
+    n = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve), 3, -3, 804U);
+    if ((n == 0U) ||
+        (HAL_UART_Transmit(huart, cerceve, FRAME_HEADER_SIZE, 100U) != HAL_OK))
+    {
+        return 0U;
+    }
+    HAL_Delay(2U);
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    if (uart_rx_get_parser()->len == 0U)
+    {
+        return 0U;                   /* onkosul: bekleyen aday olmali */
+    }
+
+    ovr_once = uart_rx_stats.overruns;
+
+    /* Tasmayi uret */
+    if (r3_tuketmeden_gonder(huart, 300U) == 0U)
+    {
+        return 0U;
+    }
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+
+    if ((uart_rx_stats.overruns != (uint16_t)(ovr_once + 1U)) ||
+        (uart_rx_get_parser()->len != 0U))
+    {
+        return 0U;                   /* aday birakilmis olmali */
+    }
+
+    /* Yeni gecerli cerceve: TAM BIR KEZ cozulmeli */
+    ok_once = uart_rx_get_parser()->frames_ok;
+    n = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve), 2, -2, 805U);
+    if ((n == 0U) ||
+        (HAL_UART_Transmit(huart, cerceve, n, 100U) != HAL_OK))
+    {
+        return 0U;
+    }
+    HAL_Delay(3U);
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);   /* ikinci tur */
+
+    return (uint8_t)((uart_rx_get_parser()->frames_ok ==
+                      (uint16_t)(ok_once + 1U)) &&
+                     (uart_rx_state.last_seq == 805U) &&
+                     (uart_rx_state.joy_x == 2));
+}
+
+
 void uart_comm_tests_run(UART_HandleTypeDef *huart)
 {
     uint16_t i_not_run;
@@ -905,6 +1283,12 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
     uint16_t i_r2_aborttc;
     uint16_t i_r2_restart;
     uint16_t i_r2_tcidle;
+    uint16_t i_r3_tamtur;
+    uint16_t i_r3_coktur;
+    uint16_t i_r3_butce;
+    uint16_t i_r3_ezilme;
+    uint16_t i_r3_p1dustu;
+    uint16_t i_r3_senkron;
     uint8_t  hw;
 
     ctx_kur(&s_ctx, uart_comm_test_kayit, UART_COMM_TEST_MAX);
@@ -938,6 +1322,13 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
     i_r2_aborttc = uart_comm_test_kaydet("RX_ABORT_TC_IGNORED",       2U, 1U);
     i_r2_restart = uart_comm_test_kaydet("RX_PRODUCER_RESTART",       2U, 1U);
     i_r2_tcidle  = uart_comm_test_kaydet("RX_TC_IDLE_SAME_POSITION",  2U, 1U);
+
+    i_r3_tamtur  = uart_comm_test_kaydet("RX_FULL_LAP_LOSS_VISIBLE",  3U, 1U);
+    i_r3_coktur  = uart_comm_test_kaydet("RX_MULTILAP",               3U, 1U);
+    i_r3_butce   = uart_comm_test_kaydet("RX_BUDGET_REMAINS",         3U, 1U);
+    i_r3_ezilme  = uart_comm_test_kaydet("RX_OVERWRITE_DURING_COPY",  3U, 1U);
+    i_r3_p1dustu = uart_comm_test_kaydet("RX_POST_COPY_SAMPLE_FAIL",  3U, 1U);
+    i_r3_senkron = uart_comm_test_kaydet("RX_RESYNC_AFTER_OVERRUN",   3U, 1U);
 
     uart_comm_test_bool(i_not_run, p0_not_run_baslangici());
     uart_comm_test_bool(i_engel,   p0_not_run_basariyi_engeller());
@@ -978,7 +1369,7 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
     if (hw == 0U)
     {
         uint16_t i;
-        for (i = i_r1_busy; i <= i_r2_tcidle; i++)
+        for (i = i_r1_busy; i <= i_r3_senkron; i++)
         {
             if ((i == i_r2_sinir) || (i == i_r2_pendtc) || (i == i_r2_sarim))
             {
@@ -1023,6 +1414,23 @@ void uart_comm_tests_run(UART_HandleTypeDef *huart)
 
     uart_comm_test_bool(i_r2_restart, r2_restart_sifirlar(huart));
     uart_comm_test_bool(i_r2_tcidle,  r2_tc_idle_ayni_konum(huart));
+
+    /* --- R3 --- */
+    uart_comm_test_bool(i_r3_tamtur, r3_tam_tur_kaybi_gorunur(huart));
+    uart_comm_test_bool(i_r3_coktur, r3_cok_tur(huart));
+    uart_comm_test_bool(i_r3_butce,  r3_butce_kalani(huart));
+
+    uart_comm_test_sonuc(i_r3_ezilme,
+                         (uint8_t)(r3_kopya_sirasinda_ezilme(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
+
+    uart_comm_test_sonuc(i_r3_p1dustu,
+                         (uint8_t)(r3_kopya_sonrasi_ornek_dustu(huart)
+                                   ? UART_COMM_TEST_PASS : UART_COMM_TEST_FAIL),
+                         (uint8_t)UART_COMM_TEST_SRC_INJECTED, 0U, 0U);
+
+    uart_comm_test_bool(i_r3_senkron, r3_tasma_sonrasi_senkron(huart));
 }
 
 #endif /* UART_COMM_TEST */

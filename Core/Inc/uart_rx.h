@@ -40,6 +40,16 @@
    ya da stream'in bozuldugu anlamina gelir. */
 #define UART_RX_SAMPLE_FAIL_MS     20U
 
+/* Ayristiriciya verilen her parcanin kopyalandigi calisma tamponunun boyu.
+   Parca kucuk tutuluyor: kopya ile dogrulama arasindaki pencere ne kadar
+   kisa olursa, DMA'nin o araligi ezmis olma ihtimali o kadar dusuk. */
+#define UART_RX_SCRATCH_SIZE       32U
+
+/* Bir servis turunda ayristiriciya verilecek EN FAZLA bayt. Sinirsiz drain
+   dongusu, surekli giriste TX'in hic servis almamasina yol acardi; tek
+   taskli tasarimda bu dogrudan gonderim gecikmesi demektir. */
+#define UART_RX_SERVICE_BUDGET     64U
+
 /* --- Alim durumu (R1) ---
    Enum adi uart_rx_PHASE_t: "uart_rx_state_t" bu baslikta ZATEN kullaniliyor
    ve joystick/sira takibi yapisinin adi. Iki ayri kavrama ayni adi vermek
@@ -103,6 +113,13 @@ typedef struct
     uint16_t sample_fails;
     uint16_t overruns;
     uint32_t discarded_bytes;
+
+    /* --- R3 ---
+       copy_rejects: kopya alindi ama dogrulama dustu (kaynak aralik
+       ezilmis ya da oturum/hata nesli degismis) ve ayristiriciya
+       VERILMEDI. Sifirdan buyuk olmasi veri kaybi anlamina gelmez;
+       surekli artmasi tuketicinin DMA'ya yetisemedigini gosterir. */
+    uint16_t copy_rejects;
 
     /* UART_RX_RESTART_MAX_TRIES denemede toparlanamadi: ALIM DURDU.
        Sessizce olmek yerine gorunur olmek icin var. Cikis yolu yalnizca
@@ -175,6 +192,18 @@ void uart_rx_service(void);
    gonderim dongusu icinden cagrilir. */
 void uart_rx_drain(void);
 
+/* Bekleyen veriyi EN FAZLA budget bayt olacak sekilde isler.
+   Donus 1: HEMEN islenebilir RX isi kaldi (cagiran yeni bir tur yapabilir,
+            yeni kesme beklemesine gerek yok).
+   Donus 0: su an yapilacak is yok. Ornekleme ertelenmisse de 0 doner;
+            aksi halde cagiran bos yere donup mesgul dongu kurardi.
+
+   Kopyalama sozlesmesi (bolum 6.3): ayristirici CANLI DMA bellegini ASLA
+   okumaz. Her parca once sabit bir calisma tamponuna alinir, kopyadan
+   once/sonra uretici konumu ve hata nesli dogrulanir; aralik ezildiyse
+   kopya ayristiriciya VERILMEZ. */
+uint8_t uart_rx_service_budget(uint16_t budget);
+
 /* Ayristirici sayaclarina salt okunur erisim. Dogrulanmis cerceve sayisi
    burada: uart_rx_get_parser()->frames_ok */
 const frame_parser_t *uart_rx_get_parser(void);
@@ -204,6 +233,17 @@ void uart_rx_test_force_sample_fail(uint8_t enable);
 /* Tamamlanmis turlarin toplami; abort sirasindaki TC'nin sayilmadigini
    dogrulamak icin okunur. */
 uint32_t uart_rx_test_get_wrap_base(void);
+
+/* --- R3 kancalari ---
+   Kopya ile dogrulama ARASINDAKI pencerede bir kez tetiklenir. Gercek
+   yaristirmayi beklemek deterministik olmadigi icin pencere taklit edilir. */
+#define UART_RX_COPY_HOOK_NONE         0U
+#define UART_RX_COPY_HOOK_SAMPLE_FAIL  1U  /* kopya sonrasi ornek alinamaz */
+#define UART_RX_COPY_HOOK_OVERWRITE    2U  /* uretici bir tur ileri sicrar */
+#define UART_RX_COPY_HOOK_ERROR_GEN    3U  /* kopya sirasinda RX hatasi */
+
+void uart_rx_test_set_copy_hook(uint8_t hook);
+uint32_t uart_rx_test_get_session(void);
 
 /* --- R1 kancalari ---
    Gercek donanimda "ReceiveToIdle_DMA basarisiz oldu" durumunu guvenilir

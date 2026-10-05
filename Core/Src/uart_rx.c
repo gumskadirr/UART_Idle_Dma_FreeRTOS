@@ -38,6 +38,7 @@ static uint32_t            s_restart_tick;           /* son deneme ani */
 static uint8_t             s_force_restart_fail;     /* yalnizca test kancasi */
 static uint8_t             s_force_start_fail;       /* yalnizca test kancasi */
 static uint8_t             s_force_sample_fail;      /* yalnizca test kancasi */
+static uint8_t             s_copy_hook;              /* yalnizca test kancasi */
 static uint8_t             s_sync_error_on_start;    /* yalnizca test kancasi */
 #endif
 
@@ -64,6 +65,12 @@ static uint32_t            s_consumed;
 /* Oturum kimligi: her durdurma/yeniden kurma yeni bir uretim oturumudur.
    Abort sirasinda olusan TC'nin normal uretime eklenmesini engeller. */
 static volatile uint32_t   s_rx_session;
+
+/* Hata nesli: her RX hata bildiriminde artar. Kopya oncesi/sonrasi
+   karsilastirilir; degismisse kopyanin ait oldugu oturum artik guvenilir
+   degildir (bolum 6.3). Sayac olmasi sart: s_rx_error tek basina
+   yetmezdi, cunku arada gelip islenmis bir hata bayragi tekrar 0 olabilir. */
+static volatile uint32_t   s_rx_error_gen;
 
 /* Tutarsiz ornekleme penceresi (bkz. bolum 6.2 adim 4). */
 static uint8_t             s_sample_failing;    /* acik basarisizlik penceresi */
@@ -416,6 +423,7 @@ HAL_StatusTypeDef uart_rx_start(UART_HandleTypeDef *huart)
     {
         /* HAL cagrisi donmeden gelen senkron hata bildirimi */
         s_rx_error = 1U;
+        s_rx_error_gen++;
         uart_rx_stats.error_events++;
     }
 #endif
@@ -477,11 +485,16 @@ void uart_rx_service(void)
         return;
     }
 
-    /* 2) Bekleyen veriyi tuket */
+    /* 2) Bekleyen veriyi tuket. Tur basina en fazla UART_RX_SERVICE_BUDGET
+       bayt: sinirsiz drain dongusu TX'in servis almasini engellerdi.
+       Kalan is varsa bir sonraki tura birakilir, bildirim beklenmez. */
     if (s_rx_pending != 0U)
     {
         s_rx_pending = 0U;
-        uart_rx_drain();
+        if (uart_rx_service_budget(UART_RX_SERVICE_BUDGET) != 0U)
+        {
+            s_rx_pending = 1U;      /* is kaldi: sonraki tur devam etsin */
+        }
     }
 
     /* 3) Yarim cerceve cok uzun suredir bekliyorsa dusur */
@@ -688,83 +701,186 @@ uint32_t uart_rx_get_consumed(void)
 }
 
 
-void uart_rx_drain(void)
+/* Ornek alinamadiginda ortak muhasebe. Donus 1: cagiran hemen cikmali. */
+static void rx_handle_sample_fail(void)
+{
+    if (rx_note_sample_fail() != 0U)
+    {
+        uart_rx_stats.sample_fails++;
+        s_sample_failing = 0U;
+        s_rx_error       = 1U;          /* ortak RX toparlanma yoluna bagla */
+    }
+}
+
+
+/* Tam tur kaybi politikasi (RX-2 / bolum 6.3).
+   Konservatif kabul: fark tampon boyuna ULASTIYSA guvenlik payi bitmistir.
+   Tam 256'da henuz fiziksel ezilme olmamis olabilir, ama okunmamis en eski
+   bayt ile DMA'nin yazma ucu ayni noktadadir ve bir sonraki bayt onu ezer.
+   Eski kodda bu durum "veri yok" gorunuyordu ve kayip SESSIZ kaliyordu. */
+static void rx_handle_overrun(uint32_t produced, uint32_t available)
+{
+    uart_rx_stats.overruns++;
+    uart_rx_stats.discarded_bytes += available;
+
+    /* Yarim aday artik guvenilmez: arkasina gelen baytlar kayip olabilir,
+       birlestirmek bozuk bir cerceveyi gecerli gosterebilirdi. */
+    frame_parser_discard(&s_parser);
+
+    /* Tuketici GUNCEL ureticiye alinir; senkron yeni gecerli cerceveyle
+       yeniden kurulur. */
+    s_consumed     = produced;
+    s_last_rx_tick = HAL_GetTick();
+}
+
+
+uint8_t uart_rx_service_budget(uint16_t budget)
 {
     const uint32_t buf_size = UART_RX_BUF_SIZE;
-    uint32_t produced;
-    uint32_t available;
-    uint32_t chunk_len;
-    uint32_t read_idx;
+    uint8_t  scratch[UART_RX_SCRATCH_SIZE];
+    uint32_t kalan = budget;
 
-    if (s_huart == NULL)
+    if ((s_huart == NULL) || (s_phase != UART_RX_PHASE_RUNNING))
     {
-        return;
+        return 0U;
     }
 
-    /* Ornekleme ertelenmisse zamani beklenir; erken tekrar bir mesgul
-       dongudur, tuketiciyi ilerletmez. */
+    /* Ornekleme ertelenmisse tekrar zamani beklenir. Burada 1 donmek
+       cagirani bos yere tekrar cagirtir ve tam da onlemek istedigimiz
+       mesgul donguyu kurardi. */
     if (rx_sample_deferred() != 0U)
     {
-        return;
+        return 0U;
     }
 
-    if (uart_rx_sample_producer(&produced) == 0U)
+    while (kalan > 0U)
     {
-        /* Gecerli ornek yok: tuketici ILERLETILMEZ ve ayristiriciya veri
-           verilmez. 20 ms boyunca duzelmezse saglik hatasi uretilir. */
-        if (rx_note_sample_fail() != 0U)
+        uint32_t c;
+        uint32_t p0;
+        uint32_t p1;
+        uint32_t available;
+        uint32_t n;
+        uint32_t read_idx;
+        uint32_t gen0;
+        uint32_t sess0;
+        uint32_t i;
+
+        if (uart_rx_sample_producer(&p0) == 0U)
         {
-            uart_rx_stats.sample_fails++;
-            s_sample_failing = 0U;
-            s_rx_error       = 1U;      /* ortak RX toparlanma yoluna bagla */
+            rx_handle_sample_fail();
+            return 0U;              /* tuketici ILERLETILMEDI */
         }
-        return;
-    }
+        rx_note_sample_ok();
 
-    rx_note_sample_ok();
+        c         = s_consumed;
+        available = p0 - c;         /* unsigned: sarimda da dogru */
 
-    available = produced - s_consumed;   /* unsigned: sarimda da dogru */
-
-    if (available == 0U)
-    {
-        return;
-    }
-
-    /* Tam tur kaybi. Konservatif kabul: fark tampon boyuna ULASTIYSA guvenlik
-       payi bitmistir, okunmamis bayt fiziksel olarak henuz ezilmemis olsa da
-       dusurulur. Eski kodda bu durum "veri yok" gorunuyordu (modulo konumlar
-       esitlenirdi) ve kayip SESSIZ kaliyordu.
-       Politikanin tamami (ayristirici adayini birakma, yeniden senkron) R3'te
-       tamamlanacak; sayac burada kuruluyor ki kayip hicbir asamada gizli
-       kalmasin. */
-    if (available >= buf_size)
-    {
-        uart_rx_stats.overruns++;
-        uart_rx_stats.discarded_bytes += (available - buf_size) + 1U;
-        frame_parser_discard(&s_parser);
-        s_consumed = produced - (buf_size - 1U);
-        available  = buf_size - 1U;
-    }
-
-    /* Yeni bayt geldi: zaman asimi sayaci bastan baslar */
-    s_last_rx_tick = HAL_GetTick();
-
-    while (available > 0U)
-    {
-        read_idx  = s_consumed % buf_size;
-        chunk_len = buf_size - read_idx;      /* tampon sonuna kadar */
-
-        if (chunk_len > available)
+        if (available == 0U)
         {
-            chunk_len = available;
+            return 0U;              /* bekleyen veri yok */
         }
 
-        frame_parser_feed(&s_parser, &s_dma_buf[read_idx],
-                          (uint16_t)chunk_len, frame_received, NULL);
+        if (available >= buf_size)
+        {
+            rx_handle_overrun(p0, available);
+            return 1U;              /* yeniden senkron sonraki turda */
+        }
 
-        s_consumed += chunk_len;
-        available  -= chunk_len;
+        /* Parca boyu dort sinirin en kucugu: calisma tamponu, bekleyen veri,
+           tamponun fiziksel sonu (sarimi tek parcada gecme) ve kalan butce. */
+        n = UART_RX_SCRATCH_SIZE;
+        if (n > available)              { n = available; }
+        read_idx = c % buf_size;
+        if (n > (buf_size - read_idx))  { n = buf_size - read_idx; }
+        if (n > kalan)                  { n = kalan; }
+
+        /* Kopya ONCESI tanik degerler: oturum ve hata nesli degisirse bu
+           kopya artik gecersiz bir oturuma aittir. */
+        sess0 = s_rx_session;
+        gen0  = s_rx_error_gen;
+
+        /* DMA bellegi volatile bayt yuklemeleriyle okunur: derleyici bu
+           okumalari birlestiremez, yeniden siralayamaz veya atamaz.
+           __DMB kopyanin cevre okumalarina gore sirasini korur. F407'de
+           D-cache yoktur; cache bakim kodu EKLENMEZ. */
+        __DMB();
+        for (i = 0U; i < n; i++)
+        {
+            scratch[i] = ((volatile const uint8_t *)s_dma_buf)[read_idx + i];
+        }
+        __DMB();
+
+#ifdef UART_COMM_TEST
+        /* TEST KANCASI: kopya ile dogrulama ARASINDAKI pencereyi taklit
+           eder. Gercek yaristirmayi beklemek deterministik degildir. */
+        switch (s_copy_hook)
+        {
+            case UART_RX_COPY_HOOK_SAMPLE_FAIL:
+                s_force_sample_fail = 1U;     /* P1 alinamayacak */
+                break;
+            case UART_RX_COPY_HOOK_OVERWRITE:
+                s_wrap_base += UART_RX_BUF_SIZE;  /* uretici bir tur sicradi */
+                break;
+            case UART_RX_COPY_HOOK_ERROR_GEN:
+                s_rx_error_gen++;             /* kopya sirasinda RX hatasi */
+                break;
+            default:
+                break;
+        }
+        s_copy_hook = UART_RX_COPY_HOOK_NONE;  /* tek atimlik */
+#endif
+
+        /* Kopya SONRASI dogrulama (bolum 6.3). */
+        if (uart_rx_sample_producer(&p1) == 0U)
+        {
+            /* P1 alinamadi: p1'in ESKI/ilklenmemis degeri KULLANILMAZ.
+               Tuketici ilerletilmez, scratch ayristiriciya verilmez. */
+            rx_handle_sample_fail();
+            return 0U;
+        }
+        rx_note_sample_ok();
+
+        if (((p1 - c) >= buf_size) ||
+            (sess0 != s_rx_session) ||
+            (gen0  != s_rx_error_gen) ||
+            (s_rx_error != 0U))
+        {
+            /* Kaynak aralik kopya sirasinda ezildi ya da oturum gecersizlesti.
+               Kopya DUSURULUR; tuketici ilerletilmez, handler CAGRILMAZ.
+               Bir sonraki tur guncel durumla yeniden karar verir. */
+            uart_rx_stats.copy_rejects++;
+            return 1U;
+        }
+
+        /* Guvenli: once tuketiciyi ilerlet, SONRA ayristiriciyi besle.
+           Sira onemli: handler icinden gelen bir cagri tutarli bir tuketim
+           konumu gormeli. */
+        s_consumed     = c + n;
+        s_last_rx_tick = HAL_GetTick();
+        kalan         -= n;
+
+        frame_parser_feed(&s_parser, scratch, (uint16_t)n,
+                          frame_received, NULL);
     }
+
+    /* Butce bitti: hemen islenebilir is kaldi mi? */
+    {
+        uint32_t p;
+
+        if (uart_rx_sample_producer(&p) == 0U)
+        {
+            return 0U;
+        }
+        return (uint8_t)((p - s_consumed) != 0U);
+    }
+}
+
+
+/* Geriye donuk destek arayuzu: butce ile ayni isi yapar.
+   Yeni testler bunu DOGRUDAN cagirmaz (R3). */
+void uart_rx_drain(void)
+{
+    (void)uart_rx_service_budget(UART_RX_SERVICE_BUDGET);
 }
 
 
@@ -786,6 +902,7 @@ void uart_rx_force_restart_fail(uint8_t enable)
 void uart_rx_test_inject_error(void)
 {
     s_rx_error = 1U;
+    s_rx_error_gen++;
 }
 
 
@@ -804,6 +921,18 @@ void uart_rx_test_sync_error_on_start(uint8_t enable)
 void uart_rx_test_force_sample_fail(uint8_t enable)
 {
     s_force_sample_fail = enable;
+}
+
+
+void uart_rx_test_set_copy_hook(uint8_t hook)
+{
+    s_copy_hook = hook;
+}
+
+
+uint32_t uart_rx_test_get_session(void)
+{
+    return s_rx_session;
 }
 
 
@@ -981,6 +1110,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     {
         uart_rx_stats.error_events++;
         uart_rx_stats.last_error = huart->ErrorCode;
+        s_rx_error_gen++;
 
         /* Toparlanma burada YAPILMAZ: kesme baglaminda HAL'i yeniden
            baslatmak yerine tuketici baglamina bildirilir. */
