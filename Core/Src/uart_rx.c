@@ -35,7 +35,16 @@ static uint8_t             s_restart_tries;          /* ust uste basarisizlik */
 static uint32_t            s_restart_tick;           /* son deneme ani */
 #ifdef UART_COMM_TEST
 static uint8_t             s_force_restart_fail;     /* yalnizca test kancasi */
+static uint8_t             s_force_start_fail;       /* yalnizca test kancasi */
+static uint8_t             s_sync_error_on_start;    /* yalnizca test kancasi */
 #endif
+
+/* R1: acik alim durumu. Yalnizca main/tuketici baglaminda yazilir. */
+static uart_rx_phase_t     s_phase = UART_RX_PHASE_STOPPED;
+
+/* Ayristirici sayaclari SOGUK kurulumda bir kez sifirlanir; sonraki
+   kurulumlar hata gecmisini korur (bkz. uart_rx.h sozlesmesi). */
+static uint8_t             s_parser_ready;
 
 uart_rx_stats_t uart_rx_stats;
 uart_rx_state_t uart_rx_state;
@@ -45,30 +54,185 @@ static void uart_rx_recover(void);
 static void restart_failed(void);
 static void check_frame_timeout(void);
 static uint16_t dma_write_pos(void);
+static void rx_set_phase(uart_rx_phase_t phase);
+static uint8_t rx_hw_receiving(const UART_HandleTypeDef *huart);
+static uint8_t rx_session_healthy(void);
+
+
+/* stats.faulted ile phase tek kaynaktan turetilir: ikisini ayri ayri
+   yazmak, birinin digerinden sapmasi demektir. */
+static void rx_set_phase(uart_rx_phase_t phase)
+{
+    s_phase = phase;
+    uart_rx_stats.faulted = (uint8_t)(phase == UART_RX_PHASE_FAULT);
+}
+
+
+uart_rx_phase_t uart_rx_get_phase(void)
+{
+    return s_phase;
+}
+
+
+/* Donanim GERCEKTEN alim yapiyor mu? Yazilim durumuna degil uc ayri
+   kanita bakilir; herhangi biri "evet" diyorsa tampon dokunulmazdir:
+     RxState  : HAL alim surecini acik tutuyor
+     CR3.DMAR : USART, DMA'dan alim istegi uretmeye devam ediyor
+     SxCR.EN  : DMA stream'i hala etkin, tampona yazabilir
+   "RxState READY" tek basina yeterli degildir: HAL durum alanini stream
+   durmadan once de temizleyebilir. */
+static uint8_t rx_hw_receiving(const UART_HandleTypeDef *huart)
+{
+    const DMA_HandleTypeDef *hdma;
+
+    if (huart == NULL)
+    {
+        return 0U;
+    }
+
+    if (huart->RxState == HAL_UART_STATE_BUSY_RX)
+    {
+        return 1U;
+    }
+
+    if (READ_BIT(huart->Instance->CR3, USART_CR3_DMAR) != 0U)
+    {
+        return 1U;
+    }
+
+    hdma = huart->hdmarx;
+    if (hdma != NULL)
+    {
+        if (READ_BIT(((DMA_Stream_TypeDef *)hdma->Instance)->CR,
+                     DMA_SxCR_EN) != 0U)
+        {
+            return 1U;
+        }
+    }
+
+    return 0U;
+}
+
+
+/* HAL_OK donmus olmasi alimin kuruldugunu KANITLAMAZ (RX-4): bu HAL'de bazi
+   dallar hata callback'ini cagri donmeden calistirir ve alim daha basliyor
+   gorunurken durmus olabilir. Bu yuzden donus degeri degil, donanimin
+   kendisi ve bekleyen hata bildirimi birlikte degerlendirilir. */
+static uint8_t rx_session_healthy(void)
+{
+    if (s_huart == NULL)
+    {
+        return 0U;
+    }
+
+    if (s_rx_error != 0U)
+    {
+        return 0U;      /* baslatma sirasinda hata bildirimi geldi */
+    }
+
+    return (uint8_t)(rx_hw_receiving(s_huart) != 0U);
+}
 
 
 HAL_StatusTypeDef uart_rx_start(UART_HandleTypeDef *huart)
 {
+    HAL_StatusTypeDef hal;
+
     if ((huart == NULL) || (huart->hdmarx == NULL))
     {
         return HAL_ERROR;
     }
 
-    s_huart           = huart;
-    s_read_pos        = 0U;
-    s_rx_pending      = 0U;
-    s_rx_error        = 0U;
-    s_last_rx_tick    = HAL_GetTick();
+    /* --- RX-1: BUTUN SIFIRLAMALARDAN ONCE sahiplik kontrolu ---
+       Eski kod handle'i, okuma konumunu, olaylari ve ayristiriciyi kosulsuz
+       sifirliyor, HAL_BUSY'yi ondan SONRA aliyordu. Boylece reddedilen bir
+       cagri bile calisan alimi bozuyordu. Artik tek bir alan bile
+       degismeden once reddediliyor. */
+    if ((s_phase == UART_RX_PHASE_STARTING) ||
+        (s_phase == UART_RX_PHASE_RUNNING)  ||
+        (s_phase == UART_RX_PHASE_ABORTING))
+    {
+        uart_rx_stats.start_rejects++;
+        return HAL_BUSY;
+    }
+
+    /* Yazilim durumu "durdu" dese bile donanim hala tamponu yaziyor
+       olabilir: o halde yeni oturum kurmak eski DMA'nin uzerine yazmaktir.
+       Bu kontrol handle degisimini de kapsar; eski sahiplik korunur. */
+    if (rx_hw_receiving(s_huart) != 0U)
+    {
+        uart_rx_stats.start_rejects++;
+        return HAL_BUSY;
+    }
+
+    /* Baska bir handle ile yeniden baglama: eski handle'in donanimi durmus
+       olmali. Yukaridaki kontrol s_huart icin bunu dogruladi; yeni handle'in
+       kendi donanimi da serbest olmali. */
+    if ((s_huart != NULL) && (huart != s_huart) &&
+        (rx_hw_receiving(huart) != 0U))
+    {
+        uart_rx_stats.start_rejects++;
+        return HAL_BUSY;
+    }
+
+    /* --- Buradan sonrasi kabul edilmis kurulum --- */
+    s_huart        = huart;
+    s_read_pos     = 0U;
+    s_rx_pending   = 0U;
+    s_rx_error     = 0U;
+    s_last_rx_tick = HAL_GetTick();
     s_recover_pending = 0U;
     s_restart_tries   = 0U;
 
-    /* Kalici hata durumundan tek cikis yolu burasi */
-    uart_rx_stats.faulted = 0U;
+    /* Soguk kurulum yalnizca ilk kez: yeniden baslatma sayaclari silmez. */
+    if (s_parser_ready == 0U)
+    {
+        frame_parser_init(&s_parser);
+        s_parser_ready = 1U;
+    }
+    else
+    {
+        frame_parser_discard(&s_parser);
+    }
 
-    frame_parser_init(&s_parser);
+    /* STARTING, HAL cagrisindan ONCE kurulur: cagri donmeden gelen bir hata
+       callback'i bu oturuma ait oldugunu buradan anlar. */
+    rx_set_phase(UART_RX_PHASE_STARTING);
 
-    return HAL_UARTEx_ReceiveToIdle_DMA(huart, s_dma_buf,
-                                        (uint16_t)sizeof(s_dma_buf));
+#ifdef UART_COMM_TEST
+    if (s_sync_error_on_start != 0U)
+    {
+        /* HAL cagrisi donmeden gelen senkron hata bildirimi */
+        s_rx_error = 1U;
+        uart_rx_stats.error_events++;
+    }
+#endif
+
+    hal = HAL_UARTEx_ReceiveToIdle_DMA(huart, s_dma_buf,
+                                       (uint16_t)sizeof(s_dma_buf));
+
+#ifdef UART_COMM_TEST
+    if (s_force_start_fail != 0U)
+    {
+        s_force_start_fail = 0U;        /* tek atimlik */
+        hal = HAL_ERROR;
+    }
+#endif
+
+    /* Donus degeri TEK BASINA yeterli degil: donanim ve bekleyen hata
+       birlikte degerlendirilir (RX-4). */
+    if ((hal == HAL_OK) && (rx_session_healthy() != 0U))
+    {
+        rx_set_phase(UART_RX_PHASE_RUNNING);
+        return HAL_OK;
+    }
+
+    /* Basarisizlik GORUNUR olmali: calismayan bir alim RUNNING gorunemez.
+       R1'de guvenli kapanis FAULT; otomatik, bloklamayan toparlanma R4'te
+       tamamlanacak. */
+    uart_rx_stats.start_fails++;
+    rx_set_phase(UART_RX_PHASE_FAULT);
+    return HAL_ERROR;
 }
 
 
@@ -89,6 +253,16 @@ void uart_rx_service(void)
     if (s_recover_pending != 0U)
     {
         uart_rx_recover();
+    }
+
+    /* R1/RX-4: veri ve zaman asimi YALNIZCA RUNNING'de islenir.
+       Eskiden toparlanma beklerken de drain/timeout calisabiliyordu: durmus
+       ya da belirsiz bir DMA'nin tamponunu ayristiriciya vermek, kurtarilmis
+       gibi gorunen bozuk cerceveler uretir. FAULT'ta sessiz kalmak dogru
+       davranistir; sayaclar ve phase durumu zaten gorunur kiliyor. */
+    if (s_phase != UART_RX_PHASE_RUNNING)
+    {
+        return;
     }
 
     /* 2) Bekleyen veriyi tuket */
@@ -113,11 +287,21 @@ static void uart_rx_recover(void)
         return;
     }
 
+    /* FAULT'tan otomatik cikis YOK: deneme butcesi tukenmistir ve her
+       serviste yeniden denemek sonucsuz bir mesgul dongu olurdu. Tek cikis
+       uart_rx_start. (R4 bunu acik kurtarma istegine baglayacak.) */
+    if (s_phase == UART_RX_PHASE_FAULT)
+    {
+        s_recover_pending = 0U;
+        return;
+    }
+
     /* Basarisiz denemeler arasinda bekle. while(1) icinde bu kontrol olmasa
        saniyede binlerce sonucsuz abort/restart cifti calisirdi. */
     if ((s_restart_tries > 0U) &&
         ((HAL_GetTick() - s_restart_tick) < UART_RX_RESTART_RETRY_MS))
     {
+        rx_set_phase(UART_RX_PHASE_RETRY_WAIT);
         return;
     }
 
@@ -136,11 +320,17 @@ static void uart_rx_recover(void)
     {
         /* HAL alimi surduruyor (ornegin tek bir gurultu hatasi: FE/NE/PE'de
            HAL alimi kesmez, yalnizca ErrorCallback cagirir); mudahale etmek
-           calisan bir alimi bozar. Yapacak is yok, borc kapanir. */
+           calisan bir alimi bozar. Yapacak is yok, borc kapanir ve alim
+           saglikli kabul edilir: ayni servis turunda tuketim surebilir. */
         s_recover_pending = 0U;
         s_restart_tries   = 0U;
+        rx_set_phase(UART_RX_PHASE_RUNNING);
         return;
     }
+
+    /* Durdurma suruyor: bu noktadan sonra tampon dokunulmaz sayilir.
+       R1'de HAL_UART_AbortReceive hala BLOKLAYICI; _IT akisi R4'te. */
+    rx_set_phase(UART_RX_PHASE_ABORTING);
 
     /* YALNIZCA RX iptal edilir. HAL_UART_Abort kullanilsaydi surmekte olan
        bir TX de iptal olurdu; plan bolum 11 bunu acikca yasakliyor.
@@ -170,12 +360,16 @@ static void uart_rx_recover(void)
     s_read_pos     = 0U;
     s_last_rx_tick = HAL_GetTick();
 
-    if (HAL_UARTEx_ReceiveToIdle_DMA(s_huart, s_dma_buf,
-                                     (uint16_t)sizeof(s_dma_buf)) == HAL_OK)
+    rx_set_phase(UART_RX_PHASE_STARTING);
+
+    if ((HAL_UARTEx_ReceiveToIdle_DMA(s_huart, s_dma_buf,
+                                      (uint16_t)sizeof(s_dma_buf)) == HAL_OK) &&
+        (rx_session_healthy() != 0U))
     {
         uart_rx_stats.restarts++;
         s_recover_pending = 0U;          /* borc ancak burada kapanir */
         s_restart_tries   = 0U;
+        rx_set_phase(UART_RX_PHASE_RUNNING);
     }
     else
     {
@@ -193,10 +387,25 @@ static void restart_failed(void)
     s_restart_tick = HAL_GetTick();
     s_restart_tries++;
 
+    /* Bu denemeye SEBEP olan bildirimi burada tuketiyoruz.
+       R1 ile baslatma sagligi artik s_rx_error'a da bakiyor; bayrak set
+       kalirsa uart_rx_service onu YENI bir hata sanip s_restart_tries'i
+       sifirlar ve deneme butcesi hic dolmaz: FAULT'a asla ulasilmayan
+       sonsuz bir yeniden deneme dongusu olusur. Hata gorunurlugu
+       kaybolmaz; error_events ve last_error korunur.
+       NOT: RX-5'in "ayni toparlanma doneminde gelen tekrar bildirimleri
+       butceyi sifirlamasin" kurali R4'te hata donemi kimligiyle tam olarak
+       uygulanacak; bu, o kuralin R1'de gereken en kucuk parcasidir. */
+    s_rx_error = 0U;
+
     if (s_restart_tries >= UART_RX_RESTART_MAX_TRIES)
     {
-        uart_rx_stats.faulted = 1U;
-        s_recover_pending     = 0U;
+        rx_set_phase(UART_RX_PHASE_FAULT);
+        s_recover_pending = 0U;
+    }
+    else
+    {
+        rx_set_phase(UART_RX_PHASE_RETRY_WAIT);
     }
 }
 
@@ -321,6 +530,18 @@ void uart_rx_force_restart_fail(uint8_t enable)
 void uart_rx_test_inject_error(void)
 {
     s_rx_error = 1U;
+}
+
+
+void uart_rx_force_start_fail(uint8_t enable)
+{
+    s_force_start_fail = enable;
+}
+
+
+void uart_rx_test_sync_error_on_start(uint8_t enable)
+{
+    s_sync_error_on_start = enable;
 }
 
 #endif /* UART_COMM_TEST */

@@ -26,6 +26,7 @@
 #define INC_UART_COMM_TESTS_H_
 
 #include <stdint.h>
+#include "stm32f4xx_hal.h"
 
 #ifdef UART_COMM_TEST
 
@@ -81,8 +82,10 @@ void uart_comm_test_sonuc(uint16_t idx, uint8_t result, uint8_t source,
 /* Kisayol: kosul dogruysa PASS, degilse FAIL. */
 void uart_comm_test_bool(uint16_t idx, uint8_t dogru_mu);
 
-/* Butun adimlarin testlerini sirayla kosar. Uretimde CAGRILMAZ. */
-void uart_comm_tests_run(void);
+/* Butun adimlarin testlerini sirayla kosar. Uretimde CAGRILMAZ.
+   ONKOSUL: uart_rx_start ve uart_tx_init cagrilmis, alim RUNNING olmali.
+   Kosucu bitiminde alimi yine RUNNING birakir. */
+void uart_comm_tests_run(UART_HandleTypeDef *huart);
 
 /* TEK kabul olcutu. "kalan == 0" bilerek yeterli sayilmaz: kosmayan ve
    atlanan testler de basariyi engeller. */

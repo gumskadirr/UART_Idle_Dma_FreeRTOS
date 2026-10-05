@@ -119,7 +119,7 @@ int main(void)
        uart_comm_test_sayisi / _gecen / _kalan / _kosmayan / _atlanan
        uart_comm_test_kayit[i].id ve .result
      Kabul olcutu TEK ifade: uart_comm_tests_ok() == 1 */
-  uart_comm_tests_run();
+  uart_comm_tests_run(&huart2);
 #endif
   /* USER CODE END 2 */
 

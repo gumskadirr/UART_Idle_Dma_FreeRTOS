@@ -33,6 +33,31 @@
    degil. */
 #define UART_RX_RESTART_MAX_TRIES   5U
 
+/* --- Alim durumu (R1) ---
+   Enum adi uart_rx_PHASE_t: "uart_rx_state_t" bu baslikta ZATEN kullaniliyor
+   ve joystick/sira takibi yapisinin adi. Iki ayri kavrama ayni adi vermek
+   yerine durum makinesi "phase" olarak adlandirildi.
+
+   Neden ayri bir durum alani gerekiyordu: eskiden "alim calisiyor mu"
+   sorusunun tek cevabi stats.faulted idi; faulted 0 iken alimin hic
+   baslamamis olmasi ile saglikli calismasi ayirt edilemiyordu. Basarisiz bir
+   ilk baslatma da sessizce "sorun yok" gibi gorunuyordu.
+
+   R1 kapsami STOPPED/STARTING/RUNNING/FAULT gecisleridir. ABORTING ve
+   RETRY_WAIT tanimli ve kullanimda, fakat bloklamayan (_IT) toparlanma akisi
+   R4'te tamamlanacak. */
+typedef enum
+{
+    UART_RX_PHASE_STOPPED = 0,  /* hic baslatilmadi veya durduruldu */
+    UART_RX_PHASE_STARTING,     /* HAL cagrisi yapildi, sonuc dogrulanmadi */
+    UART_RX_PHASE_RUNNING,      /* alim dogrulandi: veri ve zaman asimi islenir */
+    UART_RX_PHASE_ABORTING,     /* durdurma suruyor; DMA hala tamponu yaziyor
+                                   OLABILIR, parser beslenmez */
+    UART_RX_PHASE_RETRY_WAIT,   /* denemeler arasi bekleme */
+    UART_RX_PHASE_FAULT         /* guvenli calisma kurulamadi. "Donanim bozuk"
+                                   DEMEK DEGILDIR; cikis uart_rx_start ile */
+} uart_rx_phase_t;
+
 /* Alim olay sayaclari. Kesme icinde yazilip main baglaminda okundugu icin
    volatile: derleyici bu degerleri register'da onbellekleyemez. */
 typedef struct
@@ -49,6 +74,16 @@ typedef struct
     uint16_t restarts;                /* kontrollu yeniden baslatma sayisi */
     uint16_t restart_fails;           /* yeniden baslatma basarisiz oldu */
     uint16_t frame_timeouts;          /* zaman asimiyla dusurulen aday sayisi */
+
+    /* --- R1 ---
+       start_fails: uart_rx_start cagrildi ve alim KURULAMADI. Eskiden bu
+       durum hicbir yere yazilmiyordu; cagiran donus degerini yok sayarsa
+       calismayan bir alim sessizce "sorunsuz" gorunurdu.
+       start_rejects: uart_rx_start REDDEDILDI (zaten calisan alim veya baska
+       handle). Bu bir hata DEGILDIR, sahiplik korunmustur; basarisizliktan
+       ayri sayilir ki "kac kez yanlis yerden start cagrildi" gorulebilsin. */
+    uint16_t start_fails;
+    uint16_t start_rejects;
 
     /* UART_RX_RESTART_MAX_TRIES denemede toparlanamadi: ALIM DURDU.
        Sessizce olmek yerine gorunur olmek icin var. Cikis yolu yalnizca
@@ -76,9 +111,29 @@ typedef struct
 extern uart_rx_stats_t uart_rx_stats;
 extern uart_rx_state_t uart_rx_state;
 
-/* Alimi baslatir: ayristiriciyi ve okuma konumunu sifirlar, circular DMA'yi
-   IDLE olaylariyla kurar. Loopback testinde gonderimden ONCE cagrilmali. */
+/* Alimi baslatir: okuma konumunu sifirlar, circular DMA'yi IDLE olaylariyla
+   kurar. Loopback testinde gonderimden ONCE cagrilmali.
+
+   SAHIPLIK (R1): butun sifirlamalardan ONCE aktif alim ve handle kontrolu
+   yapilir. Calisan bir alima yapilan ikinci cagri HAL_BUSY doner ve
+   ayristirici adayi, okuma konumu, sira takibi ve sayaclardan HICBIRINI
+   degistirmez. Eski davranis once sifirlayip sonra HAL_BUSY aliyordu: yarim
+   paket kaybolabiliyor ve DMA'nin eski verisi yeniden tuketilebiliyordu.
+
+   Donus:
+     HAL_OK     alim kuruldu ve dogrulandi (phase RUNNING)
+     HAL_BUSY   REDDEDILDI; hicbir durum degismedi, eski alim surer
+     HAL_ERROR  gecersiz arguman ya da kurulum basarisiz (phase FAULT)
+
+   SOGUK KURULUM / YENIDEN BASLATMA: ilk basarili kurulumda ayristirici
+   sayaclari sifirlanir (frame_parser_init). Sonraki kurulumlar yalnizca
+   bekleyen adayi birakir (frame_parser_discard); hata gecmisi ve cerceve
+   sayaclari KORUNUR. */
 HAL_StatusTypeDef uart_rx_start(UART_HandleTypeDef *huart);
+
+/* Alim durum makinesinin o anki durumu. stats.faulted yalnizca
+   "phase == UART_RX_PHASE_FAULT" bilgisini tasir; ayrinti buradadir. */
+uart_rx_phase_t uart_rx_get_phase(void);
 
 /* Bekleyen veri bildirimi varsa isler. Dongude cagrilir. */
 void uart_rx_service(void);
@@ -106,6 +161,20 @@ void uart_rx_force_restart_fail(uint8_t enable);
 
 /* Kesmeden gelmis gibi bir hata bildirimi enjekte eder. */
 void uart_rx_test_inject_error(void);
+
+/* --- R1 kancalari ---
+   Gercek donanimda "ReceiveToIdle_DMA basarisiz oldu" durumunu guvenilir
+   bicimde uretmenin yolu yok: ORE'yi zorlamak HAL surumune gore farkli
+   dallara girer. Basarisiz baslatmanin GORUNUR olmasi (RX-4) ancak bu
+   kancayla sinanabilir. */
+
+/* Bir sonraki HAL alim baslatmasini basarisiz saydirir (tek atimlik). */
+void uart_rx_force_start_fail(uint8_t enable);
+
+/* HAL baslatma cagrisi DONMEDEN hata callback'i gelmis gibi davranir.
+   TX-5'in RX karsiligi: bu HAL'de bazi dallar callback'i senkron cagirir,
+   bu yuzden "HAL_OK dondu" tek basina saglikli alim kaniti degildir. */
+void uart_rx_test_sync_error_on_start(uint8_t enable);
 
 #endif /* UART_COMM_TEST */
 

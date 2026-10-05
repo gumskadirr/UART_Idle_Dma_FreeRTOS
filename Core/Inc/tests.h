@@ -98,8 +98,10 @@ extern uint8_t  lb_iptal_nedeni; /* lb_iptal_* degerlerinden biri */
 
 extern uint8_t  lb_kaynak[LB_SONUC_ADET];
 
-/* T6, uart_rx_start() cagirdigi icin ayristirici sayaclarini sifirlar.
-   T6 oncesindeki toplamlar burada saklanir. */
+/* T6 oncesindeki toplamlar debugger'da gorunsun diye saklanir.
+   NOT (R1): uart_rx_start artik ayristirici sayaclarini SIFIRLAMIYOR; soguk
+   kurulum yalnizca ilk cagridadir, sonrakiler frame_parser_discard kullanir.
+   Bu alanlar yine de tutuluyor: T6 oncesi/sonrasi karsilastirmasi icin. */
 extern uint16_t lb_frames_ok;
 extern uint16_t lb_last_seq;
 extern uint16_t lb_seq_gaps;
