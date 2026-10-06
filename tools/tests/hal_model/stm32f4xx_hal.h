@@ -18,12 +18,23 @@ typedef struct { volatile uint32_t CR, NDTR, flags; } DMA_Stream_TypeDef;
 typedef struct {
     DMA_Stream_TypeDef *Instance; HAL_DMA_StateTypeDef State;
     void *Parent;
-    struct { uint32_t Direction, Mode; } Init;
+    struct { uint32_t Direction, Mode, MemInc, PeriphDataAlignment, MemDataAlignment; } Init;
 } DMA_HandleTypeDef;
 #define DMA_PERIPH_TO_MEMORY 0U
 #define DMA_MEMORY_TO_PERIPH 1U
 #define DMA_CIRCULAR 1U
 #define DMA_NORMAL 0U
+#define DMA_MINC_ENABLE 1U
+#define DMA_MINC_DISABLE 0U
+#define DMA_PDATAALIGN_BYTE 0U
+#define DMA_PDATAALIGN_HALFWORD 1U
+#define DMA_MDATAALIGN_BYTE 0U
+#define DMA_MDATAALIGN_HALFWORD 1U
+#define UART_WORDLENGTH_8B 0U
+#define UART_WORDLENGTH_9B 1U
+#define UART_PARITY_NONE 0U
+#define UART_PARITY_EVEN 1U
+#define UART_STOPBITS_1 0U
 typedef struct { volatile uint32_t CR1, CR3, SR, DR; } USART_TypeDef;
 typedef struct {
     USART_TypeDef *Instance;
@@ -33,6 +44,7 @@ typedef struct {
     uint32_t ErrorCode, ReceptionType;
     DMA_HandleTypeDef *hdmatx;
     HAL_UART_StateTypeDef gState;
+    struct { uint32_t WordLength, Parity, StopBits; } Init;
 } UART_HandleTypeDef;
 
 #define USART_CR3_DMAR (1U << 6)
@@ -95,36 +107,20 @@ void HAL_UART_AbortReceiveCpltCallback(UART_HandleTypeDef *);
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *);
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *);
 void HAL_UART_AbortTransmitCpltCallback(UART_HandleTypeDef *);
-#endif
-
 #define DMA1_Stream0 (&model_dma_streams[0])
-
 #define DMA1_Stream1 (&model_dma_streams[1])
-
 #define DMA1_Stream2 (&model_dma_streams[2])
-
 #define DMA1_Stream3 (&model_dma_streams[3])
-
 #define DMA1_Stream4 (&model_dma_streams[4])
-
 #define DMA1_Stream5 (&model_dma_streams[5])
-
 #define DMA1_Stream6 (&model_dma_streams[6])
-
 #define DMA1_Stream7 (&model_dma_streams[7])
-
 #define DMA2_Stream0 (&model_dma_streams[8])
-
 #define DMA2_Stream1 (&model_dma_streams[9])
-
 #define DMA2_Stream2 (&model_dma_streams[10])
-
 #define DMA2_Stream3 (&model_dma_streams[11])
-
 #define DMA2_Stream4 (&model_dma_streams[12])
-
 #define DMA2_Stream5 (&model_dma_streams[13])
-
 #define DMA2_Stream6 (&model_dma_streams[14])
-
 #define DMA2_Stream7 (&model_dma_streams[15])
+#endif

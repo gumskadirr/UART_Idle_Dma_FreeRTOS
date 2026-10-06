@@ -1,8 +1,17 @@
 # UART: kullanım, çalışma yapısı ve sadeleştirme incelemesi
 
-Güncelleme: 6 Ekim 2026. Testler ayrı klasöre taşındı; frame/parser/CRC tek protokol modülünde birleştirildi. Bu belge güncel kullanım ve dosya düzenini açıklar.
+Güncelleme: 6 Ekim 2026. UART `Lib/Uart` paketine taşındı; protokol isteğe bağlı adaptörle bağlanır. Yeni projeye taşıma için [paket kullanımını](Lib/Uart/README.md) oku. Bu belge mevcut kartın uygulama ve test düzenini açıklar.
 
-RX ve TX'in tamamı `Core/Src/uart_comm.c` içindedir. Uygulama yalnız `Core/Inc/uart_comm.h` kullanır. Tek `UartCommTask`, circular RX DMA'yı ve normal TX DMA'yı yönetir; iş yokken notification ile süresiz uyur.
+RX ve TX çekirdeği `Lib/Uart/uart_comm.c` içindedir. Uygulama yalnız `Lib/Uart/uart_comm.h` kullanır. Tek `UartCommTask`, circular RX DMA'yı ve normal TX DMA'yı yönetir; iş yokken notification ile süresiz uyur.
+
+
+## Katmanlı bağlantı
+
+`uart_comm` doğrulanmış scratch byte'larını teslim eder; parser veya paket formatını bilmez. `protocol_uart` parser context'ini taşır ve DATA/TIMEOUT/RESET olaylarını işler. `protocol` format/CRC kurallarını, `app_protocol` joystick/SEQ gibi uygulama davranışını yönetir. Hepsi tek UART taskının çağrı akışındadır.
+
+RX callback dönüşündeki PENDING eksik aday için deadline kurar; VALIDATED gerçekten doğrulanmış mesajı bildirir. Timeout 50 ms üretici ilerlememesine bağlıdır; reset eski adayı istatistikleri koruyarak atar. `rx_timeouts` genel UART timeout olayıdır; parser istatistikleri adaptör context'indedir. Ham byte kullanımında bu bitler sıfır döner ve periyodik timeout uyanması olmaz.
+
+Yeni projeye yalnız `Lib/Uart` kopyalanabilir. Aynı paket formatı kullanılacaksa `protocol` ve adaptör de eklenir; uygulama handler'ı yeni proje ihtiyacına göre seçilir. Mevcut kartın pin, DMA channel ve RTOS ayarları değişmedi.
 
 ## Kodu okumak için kısa yol
 
@@ -15,13 +24,13 @@ Uygulama yazarken dört UART fonksiyonu yeterlidir:
 | `uart_comm_get_snapshot()` | Son yayımlanan durum/sayaç kopyasını verir | Durum okumak için |
 | `uart_comm_request_recovery()` | RX ve/veya TX için kurtarma isteğini kaydeder | Hata sonrası uygulama kararıyla |
 
-`uart_comm_on_uart_irq_exit()` IRQ bağlantısına aittir; uygulama bu fonksiyonu çağırmaz. `rx_service`, `tx_service` gibi iç fonksiyonlarla ayrıca servis döngüsü kurulmaz.
+`uart_comm_on_uart_irq_exit(&huart2)` IRQ bağlantısına aittir; uygulama bu fonksiyonu çağırmaz. `rx_service`, `tx_service` gibi iç fonksiyonlarla ayrıca servis döngüsü kurulmaz.
 
 Okuma sırası: `main.c` başlangıç → `uart_comm.h` uygulama arayüzü → `app_protocol.c` gelen verinin kullanımı. Yalnız sürücüyü anlamak/değiştirmek gerektiğinde `uart_comm.c` içindeki ayrıntılara geçilir.
 
 ## uart_comm.c içindeki okuma sırası
 
-Dosya bölümleri: ortak context/tamponlar ve kritik bölüm → RX DMA/ayrıştırma → RX toparlanma → TX DMA → kuyruk/sonuç/snapshot → owner task → public API → HAL callback/IRQ. İç yardımcılar `rx_`, `tx_` veya `comm_` önekiyle sorumluluğunu belirtir. Test kancaları ve DWT ölçümleri koşullu test bölümlerindedir.
+Dosya bölümleri: ortak context/tamponlar ve kritik bölüm → RX DMA/byte teslimi → RX toparlanma → TX DMA → kuyruk/sonuç/snapshot → owner task → public API → proje callback/IRQ kapıları. İç yardımcılar `rx_`, `tx_` veya `comm_` önekiyle sorumluluğunu belirtir. Test kancaları ve DWT ölçümleri koşullu test bölümlerindedir.
 
 Ana servis turu `comm_service_once()` içinde şu sırayla çalışır:
 
@@ -39,7 +48,8 @@ Bu ayrım işlem ve kilit sırasını korur. Public API dört UART fonksiyonu ol
 flowchart LR
     PC[Karşı cihaz] --> RX[USART2 RX + dairesel DMA]
     RX --> Task[UartCommTask]
-    Task --> Parser[Parser: başlık, uzunluk, CRC]
+    Task --> Adapter[protocol_uart: byte/reset/timeout]
+    Adapter --> Parser[protocol: başlık, uzunluk, CRC]
     Parser --> App[app_protocol: sıra, X/Y]
     Sender[Uygulama taskı] --> Send[send_copy]
     Send --> Queue[8 öğelik TX kuyruğu]
@@ -92,7 +102,7 @@ Include'lar USER CODE Includes, dosya düzeyindeki callback ve handler tanımı 
 ```c
 #include "uart_comm.h"
 #include "app_protocol.h"
-#include "protocol.h"
+#include "protocol_uart.h"
 #include <stddef.h>
 
 static void tx_result(const uart_comm_tx_result_t *result, void *user)
@@ -105,8 +115,10 @@ static void tx_result(const uart_comm_tx_result_t *result, void *user)
     (void)user;
 }
 
+static protocol_uart_t protocol;
 static const uart_comm_handlers_t handlers = {
-    .on_frame = app_protocol_on_frame,
+    .on_rx = protocol_uart_on_rx,
+    .rx_user = &protocol,
     .on_tx_result = tx_result,
     .user = NULL
 };
@@ -115,6 +127,7 @@ static const uart_comm_handlers_t handlers = {
 Bağlantı çağrısı `main()` içindeki USER CODE RTOS_THREADS alanına aittir:
 
 ```c
+protocol_uart_init(&protocol, app_protocol_on_frame, NULL);
 if (uart_comm_init(&huart2, &handlers) != HAL_OK) Error_Handler();
 ```
 
@@ -172,11 +185,11 @@ STM32F407VG/168 MHz; USART2 PA2–PA3, 115200 8N1; RX DMA1 Stream5 Channel4 circ
 
 HAL tick TIM6'dan, RTOS tick SysTick'ten gelir; RTOS 1000 Hz. NVIC GROUP4; USART2 ve iki DMA IRQ önceliği 5, max syscall önceliği 5, 4 priority bit. `uart_comm_init` tek statik UART taskını priority 25 ve 512 `StackType_t` (2048 bayt) stack ile kurar; mevcut defaultTask priority 24'tür. Üretimde boş defaultTask suspend olur. Daha yüksek öncelikli uygulama yükü eklenirse RX hizmet gecikmesi yeniden ölçülmelidir; 256 bayt halka yaklaşık 22,2 ms'de dolar.
 
-HAL callback'leri modülde tek tanımlıdır. `USART2_IRQHandler` USER CODE çıkışında `uart_comm_on_uart_irq_exit()` çağrılır. Kullanıcı ikinci callback/servis/HAL sahibi eklememelidir. `uart_comm_internal.h` uygulama arayüzü değildir.
+HAL callback'leri projenin `main.c` USER CODE alanında tek tanımlıdır; kütüphanenin handle alan `uart_comm_on_*` kapılarına yönlendirilir. `USART2_IRQHandler` USER CODE çıkışında `uart_comm_on_uart_irq_exit(&huart2)` çağrılır. Kullanıcı ikinci callback/servis/HAL sahibi eklememelidir. `uart_comm_internal.h` uygulama arayüzü değildir.
 
 ## Doğrulama
 
-PC: `python tools/test_uart_rx.py`, `python tools/test_uart_tx.py`, `python tools/test_uart_comm.py`.
+PC: `python tools/test_uart_rx.py`, `python tools/test_uart_tx.py`, `python tools/test_uart_comm.py`, `python tools/test_uart_port.py`. Protokolsüz USART1 ARM link/ayar kontrolü: `python tools/test_uart_portable.py` (karta yüklenmez).
 
 Kart: `tools/build.sh test`, ardından `python tools/run_board_tests.py`; PA2–PA3 jumper'ı gerekir. Üretim: `tools/build.sh` (`UART_COMM_TEST` kapalı). Güncel CubeMX kaynak listesini almak için CubeIDE'de projeyi derle.
 
@@ -209,17 +222,18 @@ Uygulama için üç modül yeterlidir:
 
 | Modül | Kaynak / başlık | Sorumluluk |
 |---|---|---|
-| UART | `Core/Src/uart_comm.c`, `Core/Inc/uart_comm.h` | RX/TX DMA, tek owner task, TX kuyruğu ve hata toparlama |
+| UART paketi | `Lib/Uart` | RX/TX, tek owner task, kuyruk; config ve STM32F4 donanım portu |
+| Protokol adaptörü | `Core/Src/protocol_uart.c`, `Core/Inc/protocol_uart.h` | Byte, reset ve timeout olaylarını parser'a bağlar |
 | Protokol | `Core/Src/protocol.c`, `Core/Inc/protocol.h` | Çerçeve oluşturma, CRC ve akış ayrıştırma; HAL/RTOS bağımsız |
 | Uygulama | `Core/Src/app_protocol.c`, `Core/Inc/app_protocol.h` | SEQ takibi, joystick X/Y ve tutarlı snapshot |
 
 `protocol.c` içinde CRC, çerçeve oluşturma ve ayrıştırma olmak üzere üç bölüm vardır. Önceki `frame_build`, `frame_build_joystick`, `frame_parser_*`, `crc16_ccitt` fonksiyonlarının imzaları ve davranışı korunur. Yeni uygulama örneklerinde `protocol.h` kullanılır; eski frame/parser/CRC header'ları kaldırılmıştır.
 
-`Core/Inc/uart_comm_internal.h` sürücünün private tanımları ve `UART_COMM_TEST` kapılı test erişimidir. Uygulama bu başlığı kullanmaz. `app_proto_state` artık dosya içidir; uygulama ve testler durum değerlerini `app_protocol_get_snapshot()` ile okur. Snapshot mevcut kesme maskesini korur.
+`Lib/Uart/uart_comm_internal.h` sürücünün private tanımları ve `UART_COMM_TEST` kapılı test erişimidir. Uygulama bu başlığı kullanmaz. `app_proto_state` artık dosya içidir; uygulama ve testler durum değerlerini `app_protocol_get_snapshot()` ile okur. Snapshot mevcut kesme maskesini korur.
 
 Kart testleri `Tests/Src` ve `Tests/Inc` içinde üç C/H çifti olarak korunur: `tests`, `uart_comm_tests`, `uart_rtos_tests`. PC model testleri `tools/tests` içindedir. Test derlemesinde `Tests/Inc` include yolu ve `Tests` kaynak klasörü CubeIDE Debug/Release yapılandırmalarına eklenmiştir. Test gövdeleri `UART_COMM_TEST` kapalıyken firmware'e girmez.
 
-Core'daki C/H sayısı **29 → 19** oldu. Altı test dosyası taşındı; protokolün altı dosyası iki dosyaya indi. Proje genelindeki gerçek kaynak dosyası azalması **4**. Generated platform, HAL ve FreeRTOS dosyaları korunur; `.ioc`, pinler, baud, IRQ öncelikleri ve RTOS zamanlama ayarları değişmez.
+Önceki sadeleştirmede Core'daki C/H sayısı **29 → 19** oldu; proje genelinde dört kaynak dosyası azaldı. Katmanlı geçiş, UART'ın üç dosyasını Lib/Uart'a taşıdı; config/port ve isteğe bağlı adaptör eklendi. Generated platform, HAL ve FreeRTOS dosyaları korunur; `.ioc`, pinler, baud, IRQ öncelikleri ve RTOS zamanlama ayarları değişmez.
 
 Kök klasörde üç güncel belge bulunur: bu kullanım belgesi, [birleşik mimari/yol haritası](UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md) ve [RTOS uygulama/ölçüm kaydı](UART_RTOS_UYGULAMA_PLANI.md). Beş eski belge `docs/archive` altına taşınmıştır; test/hash/karar kayıtları silinmemiştir:
 
@@ -229,7 +243,7 @@ Kök klasörde üç güncel belge bulunur: bu kullanım belgesi, [birleşik mima
 - [Önceki TX doğrulama kaydı](docs/archive/UART_UYGULAMA_DURUMU.md)
 - [Önceki bulguların kapanışı](docs/archive/ACIK_BULGULAR.md)
 
-Arşiv belgelerindeki eski API ve dosya adları tarihsel bilgidir. CubeMX yeniden kod ürettiğinde custom `Tests` kaynak/include kayıtlarını koruduğunu kontrol et. Komut satırı derlemesi IDE'nin ürettiği kaynak listesini kullandığı için kaynak taşımadan sonra CubeIDE'de yeniden derleme gerekir; `Debug/subdir.mk` elle düzenlenmez.
+Arşiv belgelerindeki eski API ve dosya adları tarihsel bilgidir. CubeMX yeniden kod ürettiğinde custom `Tests` ve `Lib/Uart` kaynak/include kayıtlarını koruduğunu kontrol et. Komut satırı derlemesi IDE'nin ürettiği kaynak listesini kullandığı için kaynak taşımadan sonra CubeIDE'de yeniden derleme gerekir; `Debug/subdir.mk` elle düzenlenmez.
 
 ## Sadelik için korunan sınırlar
 

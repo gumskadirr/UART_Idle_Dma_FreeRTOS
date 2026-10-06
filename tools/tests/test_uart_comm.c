@@ -94,6 +94,7 @@ static int setup(void)
                                      .rx_user = &comm_protocol};
     protocol_uart_init(&comm_protocol, frame_handler, NULL);
     dma_rx.Parent = dma_tx.Parent = &uart;
+    dma_rx.Init.MemInc = dma_tx.Init.MemInc = DMA_MINC_ENABLE;
     dma_rx.Init.Direction = DMA_PERIPH_TO_MEMORY; dma_rx.Init.Mode = DMA_CIRCULAR;
     dma_tx.Init.Direction = DMA_MEMORY_TO_PERIPH; dma_tx.Init.Mode = DMA_NORMAL;
     CHECK(uart_comm_init(&uart, &handlers) == HAL_OK);
@@ -103,6 +104,7 @@ static int setup(void)
 static int wrong_dma(void)
 {
     uart_comm_handlers_t handlers = {.on_tx_result = on_result};
+    dma_rx.Init.MemInc = dma_tx.Init.MemInc = DMA_MINC_ENABLE;
     CHECK(uart_comm_init(&uart, &handlers) == HAL_ERROR); /* Parent eksik */
     dma_rx.Parent = dma_tx.Parent = &uart;
     CHECK(uart_comm_init(&uart, &handlers) == HAL_ERROR); /* RX circular degil */

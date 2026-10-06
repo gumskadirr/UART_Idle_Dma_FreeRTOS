@@ -1794,7 +1794,7 @@ static uint8_t r5_devam_eden_cerceve_dusmez(UART_HandleTypeDef *huart)
 
     /* Sessizce sinira yaklas */
     t0 = HAL_GetTick();
-    while ((HAL_GetTick() - t0) < (UART_RX_FRAME_TIMEOUT_MS - 3U))
+    while ((HAL_GetTick() - t0) < (UART_RX_TIMEOUT_MS - 3U))
     {
         rx_service();
         test_tx_service();
@@ -1916,7 +1916,7 @@ static uint8_t r5_zaman_asimi_yeniden_kurulur(UART_HandleTypeDef *huart)
     {
         /* Hala aday var: YENI pencere kurulmus olmali, 0 DEGIL. */
         return (uint8_t)((bekleme != 0U) && (bekleme != UINT32_MAX) &&
-                         (bekleme <= UART_RX_FRAME_TIMEOUT_MS));
+                         (bekleme <= UART_RX_TIMEOUT_MS));
     }
 
     /* Aday kalmadi: son tarih tamamen kalkmali */

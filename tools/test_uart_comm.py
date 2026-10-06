@@ -14,7 +14,7 @@ def main():
     out = ROOT / '.build/host-tests/comm_tests.exe'
     subprocess.run([str(cc), '-std=c99', '-Wall', '-Wextra', '-Werror', '-DUART_COMM_TEST', '-DUART_RTOS_MODEL',
                     '-Itools/tests/rtos_model', '-Itools/tests/hal_model', '-ICore/Inc', '-ILib/Uart',
-                    'tools/tests/test_uart_comm.c', 'Core/Src/uart_comm.c', 'Lib/Uart/uart_comm_port.c', 'tools/tests/hal_model/uart_callbacks.c', 'Core/Src/protocol.c', 'Core/Src/protocol_uart.c', '-o', str(out)], cwd=ROOT, env=env, check=True)
+                    'tools/tests/test_uart_comm.c', 'Lib/Uart/uart_comm.c', 'Lib/Uart/uart_comm_port.c', 'tools/tests/hal_model/uart_callbacks.c', 'Core/Src/protocol.c', 'Core/Src/protocol_uart.c', '-o', str(out)], cwd=ROOT, env=env, check=True)
     failed = 0
     for case in CASES:
         result = subprocess.run([str(out), case], capture_output=True, text=True, env=env, cwd=ROOT)

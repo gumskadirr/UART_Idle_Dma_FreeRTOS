@@ -9,20 +9,6 @@
 #endif
 
 
-/* Mevcut 256 bayt Circular DMA ve 115200/8N1 ayari korunur. */
-#define UART_RX_BUF_SIZE             256U
-#define UART_RX_SCRATCH_SIZE          32U
-#define UART_RX_SERVICE_BUDGET        64U
-#define UART_RX_FRAME_TIMEOUT_MS     50U
-#define UART_RX_RESTART_RETRY_MS       5U
-#define UART_RX_RESTART_MAX_TRIES      5U
-#define UART_RX_SAMPLE_FAIL_MS       20U
-#define UART_RX_ABORT_TIMEOUT_MS     20U
-#define UART_RX_RECOVERY_BUDGET_MS   100U
-#define UART_RX_HEALTHY_MS           100U
-
-
-
 typedef struct {
     /* Kesme yazar. Olay sayilari, bayt sayisi degildir. */
     uint32_t bytes_consumed, late_events;
@@ -76,23 +62,23 @@ void comm_test_pause_owner(uint8_t pause);
 #endif
 
 /* Owner API: tek ana dongu/task cagirir. Aktif start HAL_BUSY doner;
- * parser, DMA konumu ve sahiplik degismez. Ilk kurulum init, tekrar discard.
+ * RX callback, DMA konumu ve sahiplik degismez. Baslatmada RESET teslim edilir.
  * HAL_OK: RUNNING; kurulum hatasi HAL_ERROR: FAULT, DMA hala aktif olabilir.
  * Hata donusunden sonra service sinirli toparlanmayi otomatik isletir. */
 UART_LOCAL HAL_StatusTypeDef rx_start(UART_HandleTypeDef *uart);
 UART_LOCAL void rx_service(void);
 
 /* Handler start oncesi STOPPED/FAULT'ta kurulur. Kisa calisir, HAL/service
- * cagirmaz. Payload yalniz callback suresince gecerlidir; saklanacaksa kopyala. */
+ * cagirmaz. DATA yalniz callback suresince gecerlidir; saklanacaksa kopyala. */
 UART_LOCAL void rx_set_handler(uart_comm_rx_handler_t handler, void *user);
 
 /* En fazla budget bayt tuketir. 1: hemen islenebilir veri kaldi.
  * Ertelenmis sample 0 doner; sonraki servisi next_wait_ms planlar.
- * Parser yalniz dogrulanmis 32 baytlik scratch'i okur. */
+ * Handler yalniz dogrulanmis scratch kopyasini okur. */
 UART_LOCAL uint8_t rx_service_budget(uint16_t budget);
 
-/* 0: hemen is; UINT32_MAX: deadline yok. Frame, sample retry, abort ve
- * restart zamanlarini kapsar. Parser bosken periyodik timeout uyanmasi yok. */
+/* 0: hemen is; UINT32_MAX: deadline yok. RX aday, sample retry, abort ve
+ * restart zamanlarini kapsar. Eksik aday yokken periyodik timeout uyanmasi yok. */
 UART_LOCAL uint32_t rx_next_wait_ms(uint32_t now);
 UART_LOCAL rx_phase_t rx_get_phase(void);
 
@@ -130,9 +116,6 @@ UART_LOCAL uint8_t rx_test_recovery_active(void);
 UART_LOCAL uint32_t rx_test_get_session(void);
 UART_LOCAL uint32_t rx_test_get_wrap_base(void);
 #endif
-#define UART_TX_BUF_SIZE 64U
-#define UART_TX_TIMEOUT_MS 20U
-#define UART_TX_ABORT_TIMEOUT_MS 20U
 
 
 typedef enum {

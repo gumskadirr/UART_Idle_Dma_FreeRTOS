@@ -31,6 +31,15 @@ bool uart_port_validate(const UART_HandleTypeDef *uart)
 #ifndef UART_HAL_MODEL
     if (!IS_UART_INSTANCE(uart->Instance)) return false;
 #endif
+    /* Byte tamponu sozlesmesi: 9 bit/veri veya genis DMA elemani SRAM'i
+     * asabilir. Port bu paket icin desteklenen 8N1/byte ayarini dogrular. */
+    if (uart->Init.WordLength != UART_WORDLENGTH_8B || uart->Init.Parity != UART_PARITY_NONE ||
+        uart->Init.StopBits != UART_STOPBITS_1 ||
+        uart->hdmarx->Init.MemInc != DMA_MINC_ENABLE || uart->hdmatx->Init.MemInc != DMA_MINC_ENABLE ||
+        uart->hdmarx->Init.PeriphDataAlignment != DMA_PDATAALIGN_BYTE ||
+        uart->hdmarx->Init.MemDataAlignment != DMA_MDATAALIGN_BYTE ||
+        uart->hdmatx->Init.PeriphDataAlignment != DMA_PDATAALIGN_BYTE ||
+        uart->hdmatx->Init.MemDataAlignment != DMA_MDATAALIGN_BYTE) return false;
     return uart->hdmarx->Parent == uart && uart->hdmatx->Parent == uart &&
         uart->hdmarx->Init.Direction == DMA_PERIPH_TO_MEMORY && uart->hdmarx->Init.Mode == DMA_CIRCULAR &&
         uart->hdmatx->Init.Direction == DMA_MEMORY_TO_PERIPH && uart->hdmatx->Init.Mode == DMA_NORMAL;

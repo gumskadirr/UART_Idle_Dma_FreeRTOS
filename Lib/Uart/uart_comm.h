@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "stm32f4xx_hal.h"
+#include "uart_comm_config.h"
 
 typedef enum {
     UART_COMM_RX_DATA, UART_COMM_RX_TIMEOUT, UART_COMM_RX_RESET
@@ -66,10 +67,10 @@ uart_comm_send_status_t uart_comm_send_copy(const uint8_t *data, uint16_t len, u
 /* true istek kaydidir; fiziksel durus kaniti olmadan yeniden kullanim yok. */
 bool uart_comm_request_recovery(uint32_t directions);
 /* Kisa korumayla yayinlanmis tutarli kopya; init oncesi initialized=false.
- * Frame/result handler'i UART taskinda kisa calisir, beklemez; send_copy cagirilabilir. */
+ * RX/result handler'i UART taskinda kisa calisir, beklemez; send_copy cagirilabilir. */
 bool uart_comm_get_snapshot(uart_comm_snapshot_t *out);
 
-/* Yalniz USART IRQ baglantisi: HAL_UART_IRQHandler'dan sonra; uygulama API'si degil. */
+/* Proje HAL callback baglantilari; uygulama API'si degil. IRQ exit HAL handler sonrasi. */
 void uart_comm_on_rx_event(UART_HandleTypeDef *uart, uint16_t size);
 void uart_comm_on_error(UART_HandleTypeDef *uart);
 void uart_comm_on_rx_abort_complete(UART_HandleTypeDef *uart);

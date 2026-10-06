@@ -29,5 +29,24 @@ int main(void)
     uart_port_tx_clear_sources(&uart);
     CHECK(dma.Instance->flags == 0 && model_pending_clears == 1U && model_last_cleared_irq == DMA2_Stream7_IRQn);
     puts("PASS selected_tx_irq_clear");
+    {
+        USART_TypeDef regs = {0};
+        DMA_HandleTypeDef rx = {.Instance = DMA1_Stream5};
+        uart.Instance = &regs; uart.hdmarx = &rx;
+        dma.Parent = rx.Parent = &uart;
+        rx.Init.Direction = DMA_PERIPH_TO_MEMORY; rx.Init.Mode = DMA_CIRCULAR;
+        dma.Init.Direction = DMA_MEMORY_TO_PERIPH; dma.Init.Mode = DMA_NORMAL;
+        rx.Init.MemInc = dma.Init.MemInc = DMA_MINC_ENABLE;
+        CHECK(uart_port_validate(&uart));
+        uart.Init.WordLength = UART_WORDLENGTH_9B;
+        CHECK(!uart_port_validate(&uart));
+        uart.Init.WordLength = UART_WORDLENGTH_8B;
+        rx.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
+        CHECK(!uart_port_validate(&uart));
+        rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+        dma.Init.MemInc = DMA_MINC_DISABLE;
+        CHECK(!uart_port_validate(&uart));
+    }
+    puts("PASS byte_dma_validation");
     return 0;
 }

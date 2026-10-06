@@ -21,3 +21,10 @@ typedef StaticQueue_t *QueueHandle_t;
 #define portYIELD_FROM_ISR(x) ((void)(x))
 void model_assert(void);
 #endif
+
+#ifndef configMAX_PRIORITIES
+#define configMAX_PRIORITIES 56
+#endif
+#define configSUPPORT_STATIC_ALLOCATION 1
+#define configUSE_TASK_NOTIFICATIONS 1
+#define INCLUDE_xTaskGetSchedulerState 1

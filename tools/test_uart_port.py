@@ -15,7 +15,7 @@ def main():
                     'tools/tests/test_uart_port.c', 'Lib/Uart/uart_comm_port.c',
                     'tools/tests/hal_model/uart_callbacks.c', '-o', str(out)], cwd=ROOT, env=env, check=True)
     subprocess.run([str(out)], cwd=ROOT, env=env, check=True)
-    print('STM32F4 port modeli: 2/2 PASS')
+    print('STM32F4 port modeli: 3/3 PASS')
     return 0
 
 if __name__ == '__main__':

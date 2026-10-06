@@ -34,7 +34,7 @@ bool app_protocol_get_snapshot(app_proto_state_t *out);
 /* Sira takibini sifirlar. Alim baslatilmadan ONCE cagrilir. */
 void app_protocol_init(void);
 
-/* frame_handler_t imzasi: uart_comm_init handlers.on_frame ile kaydedilir. */
+/* frame_handler_t imzasi: protocol_uart_init ile adaptore kaydedilir. */
 void app_protocol_on_frame(const frame_info_t *info, void *user_data);
 
 #endif /* INC_APP_PROTOCOL_H_ */

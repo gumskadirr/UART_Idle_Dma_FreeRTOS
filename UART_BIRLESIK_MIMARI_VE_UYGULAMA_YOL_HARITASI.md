@@ -1,7 +1,8 @@
 # Birleşik UART RX/TX mimarisi ve uygulama yol haritası
 
+Güncel paket düzeni: `Lib/Uart`; protokol bağlantısı `protocol_uart.c/.h` adaptöründedir. [Taşıma ve güncel API](Lib/Uart/README.md), [katmanlı tasarım](docs/superpowers/specs/2026-10-06-uart-katmanli-mimari-design.md) ve [uygulama planı](docs/superpowers/plans/2026-10-06-uart-katmanli-mimari.md). Aşağıdaki R/T/F aşamaları ilk geliştirme gereksinimleri ve tarihsel kabul sırasını da içerir.
 Tarih: 5 Ekim 2026  
-Revizyon: **3 — birleşik modül ve FreeRTOS uygulaması işlendi (6 Ekim 2026).**
+Revizyon: **4 — taşınabilir UART paketi ve protokol adaptörü işlendi (6 Ekim 2026).**
 Durum: **RX/TX tek uart_comm modülünde; tek statik FreeRTOS owner, FIFO ve public API uygulanmış durumda. Güncel son kabul kaydı: UART_RTOS_UYGULAMA_PLANI.md.**
 Hedef: STM32F407VG, STM32 HAL, STM32CubeIDE.
 
@@ -20,7 +21,7 @@ Hedef: STM32F407VG, STM32 HAL, STM32CubeIDE.
 ### 1.1. Kesin hedefler
 
 - UART haberleşmesi için tek task. Ayrı RX/TX taskı veya UART'a özel yazılım timer'ı yok.
-- Nihai dosyalar `Core/Src/uart_comm.c` ve `Core/Inc/uart_comm.h`. Eski `uart_rx.c/.h` ve `uart_tx.c/.h` son birleştirme adımında kaldırılacak.
+- Nihai dosyalar `Lib/Uart/uart_comm.c` ve `Lib/Uart/uart_comm.h`. Eski `uart_rx.c/.h` ve `uart_tx.c/.h` son birleştirme adımında kaldırılacak.
 - `crc16.c/.h`, `frame.c/.h`, `parser.c/.h` bağımsız kalacak. Bunların UART dosyasına taşınması gerekmiyor.
 - USART2, PA2/PA3, 115200 baud, 8N1; RX DMA1 Stream5 Channel4 Circular; TX DMA1 Stream6 Channel4 Normal korunacak.
 - RX DMA tamponu başlangıçta 256, en büyük çerçeve 64 bayt. DMA tamponları DMA erişimli SRAM'de; CCM'de olmayacak.
@@ -55,7 +56,7 @@ Kullanıcı tek task ve düşük CPU hedefini belirtti. Hedef FreeRTOS projesini
 
 ### 1.4. Güncel uygulama durumu — 6 Ekim 2026
 
-- Nihai kaynak `Core/Src/uart_comm.c`, public header `Core/Inc/uart_comm.h`; eski dört RX/TX dosyası kaldırıldı. Özel kapılar yalnız test derlemesinde dışarı açılır.
+- Nihai kaynak `Lib/Uart/uart_comm.c`, public header `Lib/Uart/uart_comm.h`; eski dört RX/TX dosyası kaldırıldı. Özel kapılar yalnız test derlemesinde dışarı açılır.
 - USART2/PA2–PA3/115200 8N1/DMA atamaları ve kullanıcının CubeMX ayarları korundu. FreeRTOS 10.3.1 ARM_CM4F; CMSIS-v2 kernel kurulumu yanında UART modülü native API kullanır. HAL 1.8.5, TIM6 HAL tick, SysTick RTOS 1000 Hz, GROUP4 ve üç UART/DMA IRQ priority 5.
 - Tek statik owner priority 25/512 stack elemanı, 8 kopyalı FIFO +1 aktif öğe, tag/epoch, tek sonuç teslimi ve korumalı snapshot. Dört fonksiyonlu kullanım örneği: [UART_COMM_KULLANIM.md](UART_COMM_KULLANIM.md).
 - F1'in geçici modül yönlendirme kapıları fiziksel birleşme önce yapıldığı için kurulmadı; aynı kayıt/notification sözleşmesi doğrudan birleşik callback'lerde doğrulandı. F1/F2 owner entegrasyonu birlikte yapıldı; her sözleşme ayrı model/kart kabul kontrolü ile doğrulandı. M1 kutuları saf taşıma ve ardından regresyonun birleşik kanıtını ifade eder.
@@ -225,8 +226,9 @@ typedef struct {
 } uart_comm_tx_result_t;
 
 typedef struct {
-    frame_handler_t on_frame;
+    uart_comm_rx_handler_t on_rx;
     void (*on_tx_result)(const uart_comm_tx_result_t *, void *);
+    void *rx_user;
     void *user;
 } uart_comm_handlers_t;
 
@@ -238,12 +240,12 @@ bool uart_comm_request_recovery(uint32_t directions);
 bool uart_comm_get_snapshot(uart_comm_snapshot_t *out);
 ```
 
-- Header `<stdbool.h>`, `<stdint.h>`, mevcut HAL ve parser tiplerini içerir; dışarıya RTOS handle'ı vermez.
+- Header `<stdbool.h>`, `<stdint.h>`, mevcut HAL, config ve genel byte callback tiplerini içerir; dışarıya RTOS handle'ı vermez. Parser adaptöre aittir.
 - `init`, scheduler başlamadan tek kez çağrılır; konfigürasyonu kopyalar, statik FIFO ve tek taskı kurar. RX DMA taskın başlangıcında açılır. NULL handle/handlers veya yanlış HAL DMA bağlantısı reddedilir; handlers içindeki fonksiyon işaretçileri NULL olabilir. Başarılı init sonrası tekrar init HAL_BUSY döner, mevcut nesneleri silmez. `handlers->user` işaretçisinin hedefi kopyalanmaz; modül çalıştığı sürece geçerli uygulama belleği olmalıdır.
 - `send_copy`: yalnız task bağlamı, `1 <= len <= FRAME_MAX_SIZE`; NULL, ISR veya sınır dışı uzunluk INVALID. API baytları taşır; protokol geçerliliğini gönderen belirler. `uint16_t` uzunluk, 256 gibi girdilerin doğrulama öncesi 0'a daralmasını önler.
 - ACCEPTED yalnız FIFO'ya kopyalanma demektir. `tag` uygulama tarafından seçilir; protokol SEQ alanından bağımsızdır. Gerekirse uygulama benzersizliğini sağlar.
 - Kabul kontrolüyle enqueue arasında TX FAULT oluşursa çağrı yine ACCEPTED dönebilir; öğe bölüm 6.5'e göre CANCELLED_FAULT sonucu alır. Bu nedenle ACCEPTED sonucu daha sonra başarı garantisi olarak kullanılamaz. Başka öncelikli task gönderimi API dönmeden işleyebileceği için uygulama `tag` ile ilişkili kayıtlarını çağrıdan **önce** hazırlar.
-- `on_frame` ve `on_tx_result` yalnız UartCommTask bağlamında kısa çalışır. Payload/result işaretçisinin ömrü yalnız callback süresidir. Handler send_copy çağırabilir; service/init/abort çağırmaz, beklemez.
+- `on_rx` ve `on_tx_result` yalnız UartCommTask bağlamında kısa çalışır. Payload/result işaretçisinin ömrü yalnız callback süresidir. Handler send_copy çağırabilir; service/init/abort çağırmaz, beklemez.
 - FIFO kabul edilen her TX öğesi normal çalışma devam ettiği sürece **bir kez** sonuç üretir. Sonuç callback'i NULL ise sayaçlar yine güncellenir. COMPLETE, yerel UART TC tamamlanmasıdır; uzaktaki uygulamanın teslim onayı değildir.
 - `directions`: `UART_COMM_RECOVER_RX = 1U`, `UART_COMM_RECOVER_TX = 2U`. Yalnız task bağlamından, geçerli maskeyle istek kabul edilir; true başarılı toparlanma değil isteğin kaydıdır. Çalışan yöne zarar verilmez; owner yalnız FAULT yönlerini yeniden değerlendirir. Birleşen istekler bit olarak tutulur.
 - `uart_comm_snapshot_t` RX/TX state, hazır bilgisi ve bölüm 5.5 sayaçlarını içerir; getter NULL için false döner. Modül içi mutable parser/handle/tampon işaretçisi dışarı verilmez.
@@ -311,7 +313,7 @@ Bunlar başlangıç mühendislik değerleridir; ölçülmüş kapasite iddiası 
 
 ### 5.5. Sayaçlar ve sonuçlar
 
-Yeni haberleşme sayaçları `uint32_t` olacak: `rx_bytes_consumed`, `rx_overruns`, `rx_discarded_bytes`, `rx_frame_timeouts`, `rx_start_fails`, `rx_restarts`, `rx_recovery_fails`, `rx_snapshot_defers`, `rx_late_events`; `tx_accepted`, `tx_completed`, `tx_failed`, `tx_cancelled`, `tx_queue_full`, `tx_start_busy`, `tx_start_errors`, `tx_dma_errors`, `tx_timeouts`, `tx_recovery_fails`, `tx_late_events`. `last_rx_error`, `last_tx_error`, son başarısızlık nedeni ve queue yüksek su seviyesi ayrıca tutulur.
+Yeni haberleşme sayaçları `uint32_t` olacak: `rx_bytes_consumed`, `rx_overruns`, `rx_discarded_bytes`, `rx_timeouts`, `rx_start_fails`, `rx_restarts`, `rx_recovery_fails`, `rx_snapshot_defers`, `rx_late_events`; `tx_accepted`, `tx_completed`, `tx_failed`, `tx_cancelled`, `tx_queue_full`, `tx_start_busy`, `tx_start_errors`, `tx_dma_errors`, `tx_timeouts`, `tx_recovery_fails`, `tx_late_events`. `last_rx_error`, `last_tx_error`, son başarısızlık nedeni ve queue yüksek su seviyesi ayrıca tutulur.
 
 `rx_discarded_bytes` ölçülebilen bilinçli düşürmeyi sayar; kesmelerin çok uzun kapalı kaldığı durumda gerçek fiziksel kayıp sayısı diye sunulmaz. Parser'ın mevcut 16 bit sayaçları bu değişiklikte korunabilir; uzun yük testlerinde taşma dikkate alınarak kısa aralıklı delta veya ayrı 32 bit haberleşme sayaçları kullanılır.
 
@@ -621,7 +623,7 @@ Kesme önceliği kuralları [FreeRTOS Cortex-M3/M4 açıklamasıyla](https://fre
 ### F1 — Tek owner taskı, callback merkezi ve olay bekleme
 
 **Bağımlılık:** F0.  
-**Yeni dosyalar:** `Core/Src/uart_comm.c`, `Core/Inc/uart_comm.h`.  
+**Yeni dosyalar:** `Lib/Uart/uart_comm.c`, `Lib/Uart/uart_comm.h`.
 **Değişen:** `uart_rx.c/.h`, `uart_tx.c/.h`, `main.c` USER CODE, IRQ USER CODE.  
 **Arayüz:** Bölüm 5.2 init; `static void UartCommTask(void *argument)`; iç `comm_notify(uint32_t events)` ve `comm_service_once(uint32_t now)`.
 
@@ -702,13 +704,17 @@ Statik bellek seçimi task ve kuyruk yaşam süresini sabit tutar; kuyruk öğel
 **Nihai dosya düzeni (6 Ekim 2026 sadeleştirmesi):**
 
 ```text
-Core/Inc/uart_comm.h         Tek public arayüz + IRQ kancaları
-Core/Src/uart_comm.c         Task, queue, RX/TX state, DMA buffer, HAL callbacks
+Lib/Uart/uart_comm.h         Tek public arayüz + IRQ kancaları
+Lib/Uart/uart_comm.c         Task, queue, RX/TX state, DMA buffer; proje olay kapıları
 Core/Inc/protocol.h          HAL/RTOS bağımsız çerçeve/CRC/parser API
 Core/Src/protocol.c
 Core/Inc/app_protocol.h      Snapshot ve uygulama handler arayüzü
 Core/Src/app_protocol.c      SEQ ve joystick uygulaması
-Core/Inc/uart_comm_internal.h Private çekirdek/test erişimi
+Lib/Uart/uart_comm_internal.h Private çekirdek/test erişimi
+Lib/Uart/uart_comm_config.h   Tampon/task/süre ayarları
+Lib/Uart/uart_comm_port.c/.h  STM32F4 register/DMA bağlantısı
+Core/Inc/protocol_uart.h     İsteğe bağlı byte/parser adaptörü
+Core/Src/protocol_uart.c     DATA/TIMEOUT/RESET -> protocol
 Tests/Inc/*.h                Kart test arayüzleri
 Tests/Src/*.c                Yalnız test yapılandırmasında etkin testler
 ```

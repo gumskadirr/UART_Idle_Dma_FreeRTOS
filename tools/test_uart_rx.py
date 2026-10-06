@@ -41,7 +41,7 @@ def main():
     executable = output / ("rx_tests.exe" if sys.platform == "win32" else "rx_tests")
     command = [cc, "-std=c99", "-Wall", "-Wextra", "-Werror", "-DUART_COMM_TEST",
                "-Itools/tests/hal_model", "-ICore/Inc", "-ILib/Uart", "tools/tests/test_uart_rx.c",
-               "Core/Src/uart_comm.c", "Lib/Uart/uart_comm_port.c", "tools/tests/hal_model/uart_callbacks.c", "Core/Src/protocol.c", "Core/Src/protocol_uart.c", "Core/Src/app_protocol.c", "-o", str(executable)]
+               "Lib/Uart/uart_comm.c", "Lib/Uart/uart_comm_port.c", "tools/tests/hal_model/uart_callbacks.c", "Core/Src/protocol.c", "Core/Src/protocol_uart.c", "Core/Src/app_protocol.c", "-o", str(executable)]
     env = os.environ.copy()
     env["PATH"] = str(pathlib.Path(cc).resolve().parent) + os.pathsep + env.get("PATH", "")
     subprocess.run(command, cwd=ROOT, env=env, check=True)

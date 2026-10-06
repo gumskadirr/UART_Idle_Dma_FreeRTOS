@@ -39,8 +39,8 @@ static uint32_t cycle_elapsed(cycle_sample_t before)
 #define COMM_PROFILE 1
 #endif
 /* ==================== Context / buffers ==================== */
-/* Circular RX DMA. Parser ve HAL islemlerinin tek sahibi ana dongu/tasktir.
- * Kesme yalniz olay kaydeder; DMA bellegi parser'a sabit kopya ile verilir. */
+/* Circular RX DMA. RX/TX ve HAL islemlerinin tek sahibi owner tasktir.
+ * Kesme yalniz olay kaydeder; DMA bellegi RX callback'ine sabit kopya ile verilir. */
 
 typedef struct {
     uart_comm_rx_handler_t handler;
@@ -78,9 +78,12 @@ typedef struct {
     struct { volatile uint8_t done, error, aborted; volatile uint32_t error_code; } events;
 } tx_context_t;
 #ifdef COMM_RTOS
-#define COMM_QUEUE_SIZE 8U
-#define COMM_STACK_SIZE 512U
-#define COMM_TASK_PRIORITY 25U /* CMSIS default task = native priority 24. */
+#if COMM_TASK_PRIORITY >= configMAX_PRIORITIES
+#error "COMM_TASK_PRIORITY must be below configMAX_PRIORITIES"
+#endif
+#if configSUPPORT_STATIC_ALLOCATION != 1 || configUSE_TASK_NOTIFICATIONS != 1 || INCLUDE_xTaskGetSchedulerState != 1
+#error "UART needs static allocation, task notifications and scheduler state API"
+#endif
 typedef struct {
     uint32_t tag, admission_epoch;
     uint16_t len;
@@ -152,7 +155,7 @@ static uint32_t remaining(uint32_t now, uint32_t deadline)
     return ((int32_t)(deadline - now) <= 0) ? 0U : deadline - now;
 }
 
-/* ==================== RX DMA / parsing ==================== */
+/* ==================== RX DMA / byte delivery ==================== */
 static void rx_set_phase(rx_phase_t phase)
 {
     comm.rx.phase = phase;
@@ -235,7 +238,7 @@ static uint8_t rx_sample_producer(uint32_t *out)
     return 0U;
 }
 
-/* Tum servis ornekleri ayni erteleme, hata butcesi ve frame saatini kullanir. */
+/* Tum servis ornekleri ayni erteleme, hata butcesi ve uretim ilerleme saatini kullanir. */
 static uint8_t rx_sample_progress(uint32_t *out)
 {
     uint32_t now = HAL_GetTick();
@@ -352,14 +355,14 @@ static void rx_service_timeout(void)
 {
     uint32_t produced, now = HAL_GetTick();
     if (!comm.rx.pending || comm.rx.events.data || rx_fault_pending() ||
-        (now - comm.rx.progress_tick) < UART_RX_FRAME_TIMEOUT_MS) return;
+        (now - comm.rx.progress_tick) < UART_RX_TIMEOUT_MS) return;
     if (!rx_sample_progress(&produced)) return;
     if (produced != comm.rx.consumed) {
         comm.rx.events.data = 1U;
         return;
     }
     now = HAL_GetTick();
-    if ((now - comm.rx.progress_tick) >= UART_RX_FRAME_TIMEOUT_MS && !rx_fault_pending()) {
+    if ((now - comm.rx.progress_tick) >= UART_RX_TIMEOUT_MS && !rx_fault_pending()) {
         rx_deliver(UART_COMM_RX_TIMEOUT, NULL, 0U);
         rx_stats.frame_timeouts++;
         comm.rx.progress_tick = now;
@@ -549,7 +552,7 @@ UART_LOCAL uint32_t rx_next_wait_ms(uint32_t now)
     case UART_RX_PHASE_RUNNING:
         if (comm.rx.sample.active) return remaining(now, comm.rx.sample.retry_at);
         if (comm.rx.events.data) return 0U;
-        return comm.rx.pending ? remaining(now, comm.rx.progress_tick + UART_RX_FRAME_TIMEOUT_MS) : UINT32_MAX;
+        return comm.rx.pending ? remaining(now, comm.rx.progress_tick + UART_RX_TIMEOUT_MS) : UINT32_MAX;
     case UART_RX_PHASE_ABORTING:
         return remaining(now, comm.rx.recovery.abort_at + UART_RX_ABORT_TIMEOUT_MS);
     case UART_RX_PHASE_RETRY_WAIT: {

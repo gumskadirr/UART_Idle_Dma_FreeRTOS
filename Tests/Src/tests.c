@@ -642,7 +642,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   HAL_Delay(1U);
   rx_service();                         /* aday olustu, tick simdi */
 
-  service_dondur(UART_RX_FRAME_TIMEOUT_MS - 3U);   /* sessizce sinira yaklas */
+  service_dondur(UART_RX_TIMEOUT_MS - 3U);   /* sessizce sinira yaklas */
 
   /* 57 bayt ~4,95 ms surer: 50 ms siniri yayinin ortasina duser */
   if (tx_send_copy(&tx[FRAME_HEADER_SIZE],
