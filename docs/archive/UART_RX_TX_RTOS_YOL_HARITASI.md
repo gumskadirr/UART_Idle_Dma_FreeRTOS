@@ -1,6 +1,8 @@
+> Arşiv: bu belgedeki eski dosya adları ve test kayıtları tarihsel bilgidir. Güncel kullanım [UART_COMM_KULLANIM.md](../../UART_COMM_KULLANIM.md) içindedir.
+
 # UART RX + TX ve ortak FreeRTOS taskı yol haritası
 
-> 6 Ekim 2026 güncellemesi: Bu belgenin eski alım/sıra anlatımı tarihsel kayıttır. Güncel birleşik RX/TX ve FreeRTOS kullanımı [UART_COMM_KULLANIM.md](UART_COMM_KULLANIM.md), mimari ve son kabul [UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md](UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md) ve [UART_RTOS_UYGULAMA_PLANI.md](UART_RTOS_UYGULAMA_PLANI.md) içindedir.
+> 6 Ekim 2026 güncellemesi: Bu belgenin eski alım/sıra anlatımı tarihsel kayıttır. Güncel birleşik RX/TX ve FreeRTOS kullanımı [UART_COMM_KULLANIM.md](../../UART_COMM_KULLANIM.md), mimari ve son kabul [UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md](../../UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md) ve [UART_RTOS_UYGULAMA_PLANI.md](../../UART_RTOS_UYGULAMA_PLANI.md) içindedir.
 
 Tarih: 30 Eylül 2026  
 Durum: Uygulama öncesi geliştirme planı. Bu belge hazırlanırken kaynak kod veya `.ioc` değiştirilmedi.

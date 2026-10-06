@@ -1,3 +1,5 @@
+> Arşiv: bu belgedeki eski dosya adları ve test kayıtları tarihsel bilgidir. Güncel kullanım [UART_COMM_KULLANIM.md](../../UART_COMM_KULLANIM.md) içindedir.
+
 # UART RX geliştirme planı
 
 Tarih: 29 Eylül 2026  

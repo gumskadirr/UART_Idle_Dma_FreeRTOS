@@ -24,7 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "uart_comm.h"
 #ifdef UART_COMM_TEST
-#include "uart_comm_test.h"
+#include "uart_comm_internal.h"
 #endif
 /* USER CODE END Includes */
 

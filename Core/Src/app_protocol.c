@@ -7,10 +7,10 @@
 #include <stddef.h>
 
 #include "app_protocol.h"
-#include "frame.h"
+#include "protocol.h"
 #include "stm32f4xx_hal.h"
 
-app_proto_state_t app_proto_state;
+static app_proto_state_t app_proto_state;
 #if defined(UART_COMM_TEST) && !defined(UART_HAL_MODEL)
 static uint32_t critical_started;
 uint32_t app_protocol_test_max_critical_cycles;

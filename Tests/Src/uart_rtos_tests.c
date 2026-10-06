@@ -1,8 +1,18 @@
 #ifdef UART_COMM_TEST
 #include "uart_rtos_tests.h"
-#include "uart_comm_test.h"
+#include "uart_comm_internal.h"
 #include "uart_comm_tests.h"
 #include "app_protocol.h"
+
+#ifdef UART_COMM_TEST
+static app_proto_state_t read_app_state(void)
+{
+    app_proto_state_t state;
+    (void)app_protocol_get_snapshot(&state);
+    return state;
+}
+#endif
+
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
@@ -200,7 +210,7 @@ static void run(void *argument)
     }
     ok &= wait_results(base + 520U, 1200U); vTaskDelay(pdMS_TO_TICKS(3U)); after = snapshot();
     check(21, ok && frames == start_frames + 520U && after.rx_overruns == before.rx_overruns &&
-              app_proto_state.last_seq == (uint16_t)(65500U + 519U));
+              read_app_state().last_seq == (uint16_t)(65500U + 519U));
 
     before = snapshot(); base = results;
     len = frame_build_joystick(data, sizeof(data), 1, 2, 1000U);

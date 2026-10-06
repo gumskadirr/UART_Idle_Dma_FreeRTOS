@@ -2,8 +2,18 @@
  * Her senaryo ayri surecte calisir: modul globals'ini sifirlayan test API'si yok. */
 #include <stdio.h>
 #include <string.h>
-#include "uart_comm_test.h"
+#include "uart_comm_internal.h"
 #include "app_protocol.h"
+
+#ifdef UART_COMM_TEST
+static app_proto_state_t read_app_state(void)
+{
+    app_proto_state_t state;
+    (void)app_protocol_get_snapshot(&state);
+    return state;
+}
+#endif
+
 
 uint32_t model_primask;
 static uint32_t tick;
@@ -126,8 +136,8 @@ static int normal(void)
     CHECK(start() == 0);
     input(f, frame_build_joystick(f, sizeof(f), 123, -456, 1), 1, 1);
     rx_service();
-    CHECK(app_proto_state.frames_handled == 1);
-    CHECK(app_proto_state.joy_x == 123 && app_proto_state.joy_y == -456);
+    CHECK(read_app_state().frames_handled == 1);
+    CHECK(read_app_state().joy_x == 123 && read_app_state().joy_y == -456);
     CHECK(rx_next_wait_ms(tick) == UINT32_MAX);
     return 0;
 }
@@ -142,7 +152,7 @@ static int active_start(void)
     CHECK(rx_start(&uart) == HAL_BUSY);
     CHECK(rx_get_parser()->len == 7 && rx_get_consumed() == 7);
     input(f + 7, n - 7, 1, 1); rx_service();
-    CHECK(app_proto_state.frames_handled == 1 && app_proto_state.last_seq == 7);
+    CHECK(read_app_state().frames_handled == 1 && read_app_state().last_seq == 7);
     return 0;
 }
 
@@ -157,7 +167,7 @@ static int budget(void)
     rx_service(); CHECK(rx_get_consumed() == 64);
     rx_service(); CHECK(rx_get_consumed() == 128);
     rx_service(); CHECK(rx_get_consumed() == 130);
-    CHECK(app_proto_state.frames_handled == 10);
+    CHECK(read_app_state().frames_handled == 10);
     return 0;
 }
 
@@ -168,7 +178,7 @@ static int overrun(void)
     CHECK(start() == 0);
     input(bytes, sizeof(bytes), 1, 1); rx_service();
     CHECK(rx_stats.overruns == 1 && rx_stats.discarded_bytes == 768);
-    CHECK(rx_get_consumed() == 768 && app_proto_state.frames_handled == 0);
+    CHECK(rx_get_consumed() == 768 && read_app_state().frames_handled == 0);
     return 0;
 }
 
@@ -193,9 +203,9 @@ static int sample_retry(void)
     CHECK(start() == 0);
     input(f, frame_build_joystick(f, sizeof(f), 3, 4, 8), 1, 1);
     rx_test_set_copy_hook(UART_RX_COPY_HOOK_SAMPLE_FAIL);
-    rx_service(); CHECK(app_proto_state.frames_handled == 0);
+    rx_service(); CHECK(read_app_state().frames_handled == 0);
     rx_test_force_sample_fail(0);
-    drive(2); CHECK(app_proto_state.frames_handled == 1);
+    drive(2); CHECK(read_app_state().frames_handled == 1);
     return 0;
 }
 
@@ -231,7 +241,7 @@ static int continuation(void)
     input(f, 7, 1, 1); rx_service();
     tick = 47; input(f + 7, 57, 0, 1);
     tick = 50; rx_service(); rx_service();
-    CHECK(app_proto_state.frames_handled == 1 && rx_stats.frame_timeouts == 0);
+    CHECK(read_app_state().frames_handled == 1 && rx_stats.frame_timeouts == 0);
     return 0;
 }
 
@@ -303,7 +313,7 @@ static int overwrite_copy(void)
     input(f, frame_build_joystick(f, sizeof(f), 3, 4, 1), 1, 1);
     rx_test_set_copy_hook(UART_RX_COPY_HOOK_OVERWRITE);
     rx_service_budget(64);
-    CHECK(app_proto_state.frames_handled == 0 && rx_get_consumed() == 0);
+    CHECK(read_app_state().frames_handled == 0 && rx_get_consumed() == 0);
     CHECK(rx_stats.copy_rejects == 1);
     return 0;
 }
@@ -315,7 +325,7 @@ static int error_copy(void)
     input(f, frame_build_joystick(f, sizeof(f), 3, 4, 1), 1, 1);
     rx_test_set_copy_hook(UART_RX_COPY_HOOK_ERROR_GEN);
     rx_service_budget(64);
-    CHECK(app_proto_state.frames_handled == 0 && rx_get_consumed() == 0);
+    CHECK(read_app_state().frames_handled == 0 && rx_get_consumed() == 0);
     return 0;
 }
 
@@ -457,7 +467,7 @@ static int valid_frame_closes_recovery(void)
         rx_service();
         CHECK(!rx_test_recovery_active());
     }
-    CHECK(app_proto_state.frames_handled == 6 && rx_stats.restarts == 6);
+    CHECK(read_app_state().frames_handled == 6 && rx_stats.restarts == 6);
     return 0;
 }
 static int cold_start_recovers(void)
@@ -470,7 +480,7 @@ static int cold_start_recovers(void)
     drive(10);
     CHECK(rx_get_phase() == UART_RX_PHASE_RUNNING && rx_stats.restarts == 1);
     input(f, frame_build_joystick(f, sizeof(f), 1, 2, 1), 1, 1);
-    rx_service(); CHECK(app_proto_state.frames_handled == 1);
+    rx_service(); CHECK(read_app_state().frames_handled == 1);
     return 0;
 }
 static int app_snapshot(void)

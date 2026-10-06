@@ -1,3 +1,5 @@
+> Arşiv: bu belgedeki eski dosya adları ve test kayıtları tarihsel bilgidir. Güncel kullanım [UART_COMM_KULLANIM.md](../../UART_COMM_KULLANIM.md) içindedir.
+
 # UART uygulama ve doğrulama kaydı
 
 Plan: `UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md` (revizyon 2).

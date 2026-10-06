@@ -1,26 +1,14 @@
-/*
- * app_protocol.h
- *
- * KISA uygulama handler'i: cozulmus cerceveleri yorumlar.
- *
- * NEDEN AYRI DOSYA (R5):
- * Sira takibi ve joystick cozme uart_rx.c icindeydi. Bunlar TASIMA degil
- * UYGULAMA isleridir: tasima katmanini "bu protokolde SEQ alani var ve
- * 0x10 tipi joystick demek" bilgisine baglar. Ayrildiginda uart_rx yalnizca
- * ayristirma ve teslimden sorumlu kalir; M1'de uart_comm icine tasinacak
- * olan da tam olarak o cekirdektir.
- *
- * SOZLESME: handler UartCommTask/ana dongu baglaminda KISA calisir.
- * info->payload yalnizca cagri suresince gecerlidir; saklanacaksa
- * KOPYALANIR. Handler HAL cagirmaz, beklemez, service'e tekrar girmez.
+/* Uygulama handler'i: SEQ takibi ve joystick X/Y degerleri.
+ * UartCommTask baglaminda kisa calisir; HAL cagirmaz ve beklemez.
+ * Diger tasklar durumu app_protocol_get_snapshot ile deger kopyasi olarak okur.
+ * Payload yalniz handler cagrisi boyunca gecerlidir.
  */
-
 #ifndef INC_APP_PROTOCOL_H_
 #define INC_APP_PROTOCOL_H_
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "parser.h"
+#include "protocol.h"
 
 typedef struct
 {
@@ -40,8 +28,7 @@ typedef struct
     uint32_t frames_handled;  /* handler'a teslim edilen cerceve sayisi */
 } app_proto_state_t;
 
-extern app_proto_state_t app_proto_state;
-/* Diger tasklar dogrudan globals yerine bu tutarli deger kopyasini okur. */
+/* Tutarlı snapshot: NULL ise false; mevcut kesme maskesi korunur. */
 bool app_protocol_get_snapshot(app_proto_state_t *out);
 
 /* Sira takibini sifirlar. Alim baslatilmadan ONCE cagrilir. */

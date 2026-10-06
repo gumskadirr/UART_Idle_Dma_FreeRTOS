@@ -1,6 +1,8 @@
+> Arşiv: bu belgedeki eski dosya adları ve test kayıtları tarihsel bilgidir. Güncel kullanım [UART_COMM_KULLANIM.md](../../UART_COMM_KULLANIM.md) içindedir.
+
 # UART alım zinciri — mimari ve kritik noktalar
 
-> 6 Ekim 2026 güncellemesi: Bu belgenin eski alım/sıra anlatımı tarihsel kayıttır. Güncel birleşik RX/TX ve FreeRTOS kullanımı [UART_COMM_KULLANIM.md](UART_COMM_KULLANIM.md), mimari ve son kabul [UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md](UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md) ve [UART_RTOS_UYGULAMA_PLANI.md](UART_RTOS_UYGULAMA_PLANI.md) içindedir.
+> 6 Ekim 2026 güncellemesi: Bu belgenin eski alım/sıra anlatımı tarihsel kayıttır. Güncel birleşik RX/TX ve FreeRTOS kullanımı [UART_COMM_KULLANIM.md](../../UART_COMM_KULLANIM.md), mimari ve son kabul [UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md](../../UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md) ve [UART_RTOS_UYGULAMA_PLANI.md](../../UART_RTOS_UYGULAMA_PLANI.md) içindedir.
 
 Proje: `UART_IDLE_DMA` · STM32F407VG · STM32CubeIDE 1.19 · HAL
 Durum tarihi: 30 Eylül 2026 · Kapsanan modüller: M2–M6

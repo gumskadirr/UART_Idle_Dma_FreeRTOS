@@ -431,7 +431,7 @@ Uyku öncesi son kontrolden sonra gelen ISR veya üretici isteği notification'd
 
 ### P0 — Tekrarlanabilir başlangıç ve test düzeni
 
-**Dosyalar:** `Core/Src/tests.c`, `Core/Inc/tests.h`, `Core/Src/main.c` USER CODE; gerekirse yeni `Core/Src/uart_comm_tests.c`, `Core/Inc/uart_comm_tests.h`.  
+**Dosyalar:** `Tests/Src/tests.c`, `Tests/Inc/tests.h`, `Core/Src/main.c` USER CODE; gerekirse yeni `Tests/Src/uart_comm_tests.c`, `Tests/Inc/uart_comm_tests.h`.
 **Çıktı:** `void uart_comm_tests_run(void)` kontrollü yeni test giriş noktası; üretimde çağrılmaz. Sonuç kaydı PASS/FAIL/NOT_RUN ve test kimliği taşır.
 
 - [ ] Mevcut kaynak değişikliklerini ve build konfigürasyonunu kaydet; kullanıcı değişikliklerini geri alma.
@@ -535,7 +535,7 @@ Uyku öncesi son kontrolden sonra gelen ISR veya üretici isteği notification'd
 ### T1 — Hata kapıları ve tutarlı olay alma
 
 2026-10-05: T1–T4 doğrulama kanıtları ve model/kart ayrımı
-[`UART_UYGULAMA_DURUMU.md`](UART_UYGULAMA_DURUMU.md) dosyasındadır.
+[`UART_UYGULAMA_DURUMU.md`](docs/archive/UART_UYGULAMA_DURUMU.md) dosyasındadır.
 Bu önceki kabul koşusunun kapsamıydı. Kullanıcının son birleşme/FreeRTOS isteğiyle F0–M2 yeniden kapsama alındı; güncel kayıt UART_RTOS_UYGULAMA_PLANI.md içindedir.
 
 **Bağımlılık:** R5.  
@@ -699,19 +699,18 @@ Statik bellek seçimi task ve kuyruk yaşam süresini sabit tutar; kuyruk öğel
 - [x] Kod ağacında eski include ve çağrı kalmadığını ara. Callback sembollerinin her biri tek tanım; DMA buffer'larının SRAM konumu ve yalnız bir UartCommTask olduğuna bak.
 - [x] R/T/F testlerini yeniden çalıştır; davranış/sayaç sonuçlarını taşımadan önceki firmware ile karşılaştır.
 
-**Nihai dosya düzeni:**
+**Nihai dosya düzeni (6 Ekim 2026 sadeleştirmesi):**
 
 ```text
 Core/Inc/uart_comm.h         Tek public arayüz + IRQ kancaları
 Core/Src/uart_comm.c         Task, queue, RX/TX state, DMA buffer, HAL callbacks
-Core/Inc/parser.h           HAL/RTOS bağımsız parser API
-Core/Src/parser.c
-Core/Inc/frame.h            Çerçeve/protokol alanları
-Core/Src/frame.c
-Core/Inc/crc16.h
-Core/Src/crc16.c
-Core/Src/app_protocol.c      Gerekiyorsa kısa uygulama handler'ı
-Core/Src/uart_comm_tests.c   Yalnız test yapılandırması
+Core/Inc/protocol.h          HAL/RTOS bağımsız çerçeve/CRC/parser API
+Core/Src/protocol.c
+Core/Inc/app_protocol.h      Snapshot ve uygulama handler arayüzü
+Core/Src/app_protocol.c      SEQ ve joystick uygulaması
+Core/Inc/uart_comm_internal.h Private çekirdek/test erişimi
+Tests/Inc/*.h                Kart test arayüzleri
+Tests/Src/*.c                Yalnız test yapılandırmasında etkin testler
 ```
 
 Tek dosya içinde önerilen bölüm sırası: sabitler/tipler → context ve buffers → kritik bölüm/olay yardımcıları → RX producer/kopya → RX toparlanma/timeout → TX başlatma/toparlanma → queue/public API → task → HAL callback ve IRQ kancaları. RX/TX algoritmaları tek dev fonksiyonda iç içe geçirilmez.
@@ -776,7 +775,7 @@ Bu mimari kaynak incelemesine ve açık sözleşmelere dayanır. Donanım zamanl
 - Yerel `Core/Src/uart_tx.c` ve `Core/Inc/uart_tx.h`: çalışan TX uygulaması ile henüz uygulanmamış sözleşmeler.
 - Yerel `Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c`: `HAL_UARTEx_ReceiveToIdle_DMA`, `HAL_UART_IRQHandler`, `UART_DMAError`, `HAL_UART_AbortTransmit_IT`, `HAL_UART_AbortReceive_IT`, `UART_EndTxTransfer`, `UART_EndRxTransfer`.
 - Yerel `Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma.c`: `HAL_DMA_Abort_IT` ve `HAL_DMA_IRQHandler` (abort callback ve state sırası).
-- [Mevcut UART RX/TX/RTOS referans planı](UART_RX_TX_RTOS_YOL_HARITASI.md).
+- [Mevcut UART RX/TX/RTOS referans planı](docs/archive/UART_RX_TX_RTOS_YOL_HARITASI.md).
 - [Önceki güvenilirlik planı](docs/superpowers/plans/2026-10-02-uart-guvenilirlik.md).
 - Resmî ST/FreeRTOS bağlantıları ilgili tasarım bölümlerinde verilmiştir; kullanılan HAL sürümünün gerçek davranışı için yerel kaynak esas alınır.
 

@@ -1,7 +1,8 @@
-#ifndef UART_COMM_TEST_H
-#define UART_COMM_TEST_H
+/* Private UART cekirdegi ve test erisimi; uygulama uart_comm.h kullanir. */
+#ifndef UART_COMM_INTERNAL_H
+#define UART_COMM_INTERNAL_H
 #include "uart_comm.h"
-#include "frame.h"
+#include "protocol.h"
 #ifdef UART_COMM_TEST
 #define UART_LOCAL
 #else
@@ -88,7 +89,6 @@ UART_LOCAL void rx_set_handler(frame_handler_t handler, void *user);
  * Ertelenmis sample 0 doner; sonraki servisi next_wait_ms planlar.
  * Parser yalniz dogrulanmis 32 baytlik scratch'i okur. */
 UART_LOCAL uint8_t rx_service_budget(uint16_t budget);
-UART_LOCAL void rx_drain(void); /* Eski arayuz: tek 64 baytlik tur. */
 
 /* 0: hemen is; UINT32_MAX: deadline yok. Frame, sample retry, abort ve
  * restart zamanlarini kapsar. Parser bosken periyodik timeout uyanmasi yok. */

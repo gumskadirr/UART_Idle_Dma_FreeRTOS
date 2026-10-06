@@ -14,10 +14,19 @@
 #ifdef UART_COMM_TEST
 
 #include "tests.h"
-#include "uart_comm_test.h"
+#include "uart_comm_internal.h"
 #include "app_protocol.h"
-#include "frame.h"
-#include "parser.h"
+
+#ifdef UART_COMM_TEST
+static app_proto_state_t read_app_state(void)
+{
+    app_proto_state_t state;
+    (void)app_protocol_get_snapshot(&state);
+    return state;
+}
+#endif
+
+#include "protocol.h"
 
 /* --- Kayit defteri ---
    Butun sayim mantigi bir baglam uzerinden calisir. Boylece altyapinin
@@ -387,8 +396,8 @@ static uint8_t r1_start_busy_durumu_korur(UART_HandleTypeDef *huart)
     aday_len      = rx_get_parser()->len;
     ok_once       = rx_get_parser()->frames_ok;
     drop_once     = rx_get_parser()->bytes_dropped;
-    gaps_once     = app_proto_state.seq_gap_events;
-    seq_once      = app_proto_state.last_seq;
+    gaps_once     = read_app_state().seq_gap_events;
+    seq_once      = read_app_state().last_seq;
     restarts_once = rx_stats.restarts;
 
     if (aday_len != FRAME_HEADER_SIZE)
@@ -407,8 +416,8 @@ static uint8_t r1_start_busy_durumu_korur(UART_HandleTypeDef *huart)
     if ((rx_get_parser()->len           != aday_len)  ||
         (rx_get_parser()->frames_ok     != ok_once)   ||
         (rx_get_parser()->bytes_dropped != drop_once) ||
-        (app_proto_state.seq_gap_events  != gaps_once) ||
-        (app_proto_state.last_seq  != seq_once)  ||
+        (read_app_state().seq_gap_events  != gaps_once) ||
+        (read_app_state().last_seq  != seq_once)  ||
         (rx_stats.restarts  != restarts_once) ||
         (rx_get_phase()     != UART_RX_PHASE_RUNNING))
     {
@@ -427,9 +436,9 @@ static uint8_t r1_start_busy_durumu_korur(UART_HandleTypeDef *huart)
 
     return (uint8_t)((rx_get_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
-                     (app_proto_state.last_seq == 601U) &&
-                     (app_proto_state.joy_x == 321) &&
-                     (app_proto_state.joy_y == -321) &&
+                     (read_app_state().last_seq == 601U) &&
+                     (read_app_state().joy_x == 321) &&
+                     (read_app_state().joy_y == -321) &&
                      (rx_get_parser()->bytes_dropped == drop_once));
 }
 
@@ -477,7 +486,7 @@ static uint8_t r1_baska_handle_reddedilir(UART_HandleTypeDef *huart)
 
     return (uint8_t)((rx_get_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
-                     (app_proto_state.last_seq == 602U) &&
+                     (read_app_state().last_seq == 602U) &&
                      (rx_get_phase() == UART_RX_PHASE_RUNNING));
 }
 
@@ -1159,7 +1168,7 @@ static uint8_t r3_kopya_sirasinda_ezilme(UART_HandleTypeDef *huart)
 
     return (uint8_t)((rx_get_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
-                     (app_proto_state.last_seq == 802U));
+                     (read_app_state().last_seq == 802U));
 }
 
 
@@ -1220,7 +1229,7 @@ static uint8_t r3_kopya_sonrasi_ornek_dustu(UART_HandleTypeDef *huart)
     (void)rx_service_budget(UART_RX_SERVICE_BUDGET);
 
     if ((rx_get_parser()->frames_ok != (uint16_t)(ok_once + 1U)) ||
-        (app_proto_state.last_seq != 803U))
+        (read_app_state().last_seq != 803U))
     {
         sonuc = 0U;
     }
@@ -1290,8 +1299,8 @@ static uint8_t r3_tasma_sonrasi_senkron(UART_HandleTypeDef *huart)
 
     return (uint8_t)((rx_get_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
-                     (app_proto_state.last_seq == 805U) &&
-                     (app_proto_state.joy_x == 2));
+                     (read_app_state().last_seq == 805U) &&
+                     (read_app_state().joy_x == 2));
 }
 
 
@@ -1354,7 +1363,7 @@ static uint8_t r4_fe_sonrasi_toparlanma(UART_HandleTypeDef *huart)
 
     return (uint8_t)((rx_get_parser()->frames_ok >
                       ok_once) &&
-                     (app_proto_state.last_seq == 901U));
+                     (read_app_state().last_seq == 901U));
 }
 
 
@@ -1810,7 +1819,7 @@ static uint8_t r5_devam_eden_cerceve_dusmez(UART_HandleTypeDef *huart)
     return (uint8_t)((rx_get_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
                      (rx_stats.frame_timeouts == to_once) &&
-                     (app_proto_state.last_seq == 970U));
+                     (read_app_state().last_seq == 970U));
 }
 
 
@@ -2096,9 +2105,9 @@ static uint8_t tx_wrap(UART_HandleTypeDef *huart)
             !tx_send(frame, sizeof(frame))) return 0U;
         r1_service_dondur(1U);
     }
-    return (uint8_t)(app_proto_state.frames_handled == 40U &&
-        app_proto_state.seq_gap_events == 0U && app_proto_state.last_seq == 37U &&
-        app_proto_state.joy_x == 39 && tx_stats.bytes_sent - bytes == 520U &&
+    return (uint8_t)(read_app_state().frames_handled == 40U &&
+        read_app_state().seq_gap_events == 0U && read_app_state().last_seq == 37U &&
+        read_app_state().joy_x == 39 && tx_stats.bytes_sent - bytes == 520U &&
         rx_get_produced(&produced) && produced == 520U);
 }
 static uint8_t tx_formats(UART_HandleTypeDef *huart, uint8_t format)
@@ -2115,7 +2124,7 @@ static uint8_t tx_formats(UART_HandleTypeDef *huart, uint8_t format)
         ok = tx_send(frame, 7U);
         r1_service_dondur(1U);
         ok &= (uint8_t)(rx_get_parser()->len == 7U &&
-                       app_proto_state.frames_handled == 0U);
+                       read_app_state().frames_handled == 0U);
         ok &= tx_send(frame + 7, 6U);
     } else {
         (void)memset(payload, 0x5A, sizeof(payload));
@@ -2124,8 +2133,8 @@ static uint8_t tx_formats(UART_HandleTypeDef *huart, uint8_t format)
         ok &= tx_send(frame, sizeof(frame));
     }
     r1_service_dondur(2U);
-    return (uint8_t)(ok && app_proto_state.frames_handled == (format == 0U ? 2U : 1U)
-                    && app_proto_state.seq_gap_events == 0U);
+    return (uint8_t)(ok && read_app_state().frames_handled == (format == 0U ? 2U : 1U)
+                    && read_app_state().seq_gap_events == 0U);
 }
 static uint8_t tx_line_error(UART_HandleTypeDef *huart, uint8_t ore)
 {
@@ -2169,7 +2178,7 @@ static uint8_t tx_line_error(UART_HandleTypeDef *huart, uint8_t ore)
     (void)frame_build_joystick(frame, sizeof(frame), 15, -15, 14U);
     ok &= tx_send(frame, sizeof(frame));
     r1_service_dondur(2U);
-    return (uint8_t)(ok && app_proto_state.frames_handled == 1U);
+    return (uint8_t)(ok && read_app_state().frames_handled == 1U);
 }
 static uint8_t tx_dma_error(UART_HandleTypeDef *huart, uint8_t injected)
 {
@@ -2219,7 +2228,7 @@ static uint8_t tx_dma_error(UART_HandleTypeDef *huart, uint8_t injected)
     app_protocol_init();
     ok &= tx_send(frame, sizeof(frame));
     r1_service_dondur(2U);
-    return (uint8_t)(ok && app_proto_state.frames_handled == 1U);
+    return (uint8_t)(ok && read_app_state().frames_handled == 1U);
 }
 static uint8_t tx_lost_callbacks(UART_HandleTypeDef *huart)
 {
@@ -2235,11 +2244,11 @@ static uint8_t tx_lost_callbacks(UART_HandleTypeDef *huart)
     tx_test_faults(HAL_OK, 0U, 0U, 0U);
     ok &= (uint8_t)(tx_stats.frames_sent == sent &&
         tx_stats.transfer_timeouts == (uint16_t)(timeouts + 1U) &&
-        tx_stats.abort_complete_events == aborts && app_proto_state.frames_handled == 1U);
+        tx_stats.abort_complete_events == aborts && read_app_state().frames_handled == 1U);
     (void)frame_build_joystick(frame, sizeof(frame), 18, -18, 17U);
     ok &= tx_send(frame, sizeof(frame));
     r1_service_dondur(2U);
-    return (uint8_t)(ok && app_proto_state.frames_handled == 2U);
+    return (uint8_t)(ok && read_app_state().frames_handled == 2U);
 }
 static uint8_t tx_start_results(UART_HandleTypeDef *huart)
 {
@@ -2284,7 +2293,7 @@ static uint8_t rx_review_recovery(UART_HandleTypeDef *huart, uint8_t start_error
         r1_service_dondur(1U);
         if (rx_test_recovery_active()) return 0U;
     }
-    return (uint8_t)(app_proto_state.frames_handled == (start_error ? 1U : 6U));
+    return (uint8_t)(read_app_state().frames_handled == (start_error ? 1U : 6U));
 }
 static void tx_acceptance_tests(UART_HandleTypeDef *huart)
 {

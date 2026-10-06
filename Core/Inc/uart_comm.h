@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "stm32f4xx_hal.h"
-#include "parser.h"
+#include "protocol.h"
 
 typedef enum {
     UART_RX_PHASE_STOPPED = 0,

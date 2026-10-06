@@ -40,8 +40,7 @@ def main():
     executable = output / ("rx_tests.exe" if sys.platform == "win32" else "rx_tests")
     command = [cc, "-std=c99", "-Wall", "-Wextra", "-Werror", "-DUART_COMM_TEST",
                "-Itools/tests/hal_model", "-ICore/Inc", "tools/tests/test_uart_rx.c",
-               "Core/Src/uart_comm.c", "Core/Src/parser.c", "Core/Src/frame.c",
-               "Core/Src/crc16.c", "Core/Src/app_protocol.c", "-o", str(executable)]
+               "Core/Src/uart_comm.c", "Core/Src/protocol.c", "Core/Src/app_protocol.c", "-o", str(executable)]
     env = os.environ.copy()
     env["PATH"] = str(pathlib.Path(cc).resolve().parent) + os.pathsep + env.get("PATH", "")
     subprocess.run(command, cwd=ROOT, env=env, check=True)

@@ -1,3 +1,5 @@
+> Arşiv: bu belgedeki eski dosya adları ve test kayıtları tarihsel bilgidir. Güncel kullanım [UART_COMM_KULLANIM.md](../../UART_COMM_KULLANIM.md) içindedir.
+
 # Açık bulgular — RX hata toparlanması ve zaman aşımı
 
 Tarih: 30 Eylül 2026

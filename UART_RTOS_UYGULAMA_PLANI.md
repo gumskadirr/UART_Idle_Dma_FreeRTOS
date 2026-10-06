@@ -113,3 +113,39 @@ Derleme: son normal test ve üretim tam derlemeleri0 hata/0 uyarı; üretimde te
 **Kartta tekrar üretim firmware'i var:** `.build/board-tests/ch340-final-production.elf`, SHA256 `93c819a3fa068bb68d6ed5d5298eaf8ecf378ded2626de1d269deb244edd682f`. Son başlangıç kaydı `.build/board-tests/ch340-production-smoke.log`: initialized1, rx_ready1, tx_accepting1, TX_IDLE, tasks4. `.ioc`, pinler, peripheral ayarları ve üretim `uart_comm.c` bu test çalışmasında değiştirilmedi. Pyserial önceden kurulu; yeni kütüphane eklenmedi. Commit/push yapılmadı.
 
 Kapsam dışında kalan plan açıkları: eski native yanıt örneğinin ret sayacı, iki üreticinin ortak başarılı-enqueue sırasının doğrudan izi, ana RX kontrol kutularının senkronizasyonu ve eski native hata kaynak etiketleri bu CH340 çalışmasıyla tamamen kapatılmış sayılmaz. Yeni CH340 yanıt örneği düşmeyi açık sayar/test eder; iki yönlü hat sırası, iki taskın ortak TX enqueue sırası için kanıt yerine geçmez.
+
+## 6 Ekim 2026 — dosya düzeninin sadeleştirilmesi
+
+Frame/parser/CRC altı kaynak/başlık yerine `protocol.c/.h` altında birleştirildi; fonksiyon gövdeleri, sabitler ve API imzaları korunur. Kart testlerinin altı dosyası `Tests/Src` ve `Tests/Inc` altına taşındı. Private başlık `uart_comm_internal.h` oldu; uygulama durumu dosya içinde, bütün test tüketicileri snapshot API'sinde. Core C/H sayısı29→19, gerçek proje dosyası azalması4. Beş tarihsel belge `docs/archive` altında, kökte üç güncel MD kaldı. `.ioc`, pin/peripheral/RTOS ayarları ve UART algoritmaları değişmedi.
+
+Doğrulama: PC RX31/31 + TX23/23 + RTOS16/16; kart protokol birim testleri29/29; CH340 veri/yük11/11 + ölçüm1/1 + tekrar sıra/yanlış boyut1/1, toplam13/13. CubeIDE Debug/Release, komut satırı normal test/serial/üretim tam derlemeleri0 hata/0 uyarı. Tek UART taskı ve callback seti; üretim ELF'inde test/serial sembolleri yok. Bağımsız incelemede kritik/önemli regresyon yok; yerel Markdown bağlantıları geçerli. Eski native loopback15/15 ve kabul71/71 koşusu jumper çıkarılmış olduğu için tekrar edilmedi; önceki kaydı geçerliliğinin sınırlarıyla korunur.
+
+CH340: boş hatta10sn/0 UART turu;100Hz çift yönde1000TX/1000RX,10074ms, ölçülen servis+ISR%1,476. Sürekli64bayt trafikte1000TX/1000RX,5708ms,%7,773. Kritik965cycle, IRQ1818cycle, RX latency7795cycle, frame handler2819cycle, result handler470cycle, max service44609cycle; boş stack360/512word. Bu ölçüm bütün UART taskının runtime'ı değildir; önceki tam CPU ölçümü ve diğer plan açıkları kapanmış sayılmaz.
+
+Kanıtlar `.build/board-tests/simplify-ch340-results.json`, `simplify-ch340-metrics.json`, `simplify-ch340-order.json`, `simplify-unit-board.log`, `simplify-production-smoke.log`; derlemeler `.build/simplify-ide-build.log`, `simplify-native-build.log`, `simplify-serial-build.log`, `simplify-production-build.log`.
+
+Firmware SHA256:
+- Normal test `simplify-native.elf`: `cf99d474e9e55af9367f0f4e9869e1a2ea15311f82667f6fc661721dc5090821`.
+- CH340 test `simplify-ch340.elf`: `02a412664b72411867c338e296a6502fb41d435445435d054ce72244c6b933ac`.
+- **Son kart firmware'i** üretim `simplify-production.elf`: `3f5f8410563ac0337fcc1f0f298c5e08673414bdc52bdcaccfb3a2d6dab1c227`; initialized1, rx_ready1, tx_accepting1, TX_IDLE, tasks4. Üretim text46192/data96/bss25088.
+
+Yeni kütüphane, commit veya push yapılmadı. Kullanım ve güncel dosya düzeni [UART_COMM_KULLANIM.md](UART_COMM_KULLANIM.md) içindedir.
+
+
+## 6 Ekim 2026 — uart_comm iç akışının okunabilirliği
+
+Private helper adları `rx_`/`tx_`/`comm_` sorumluluğuyla netleştirildi. `comm_service_once` sırası korunarak TX sonuç teslimi, recovery istekleri ve tek queue öğesinin hizmeti üç yardımcıya ayrıldı. Callback/IRQ tanımları dosyanın sonunda bir arada; kritik bölümlerde sıkıştırılmış işlemler ayrı satırlarda. Kullanılmayan `rx_drain` tanımı ve private prototipi kaldırıldı. Public API/timeout/task/IRQ/DMA/queue ayarı değişmedi, yeni dosya/kütüphane yok. Ana servis67→27 satır, toplam C dosyası1303→1364; bu adım okunabilirlik düzenlemesidir.
+
+PC RX31/31, TX23/23, RTOS16/16. CubeIDE Debug/Release ve komut satırı normal test/serial/üretim tam derlemeleri0 hata/0 uyarı. Üretim test/serial sembollerinden arındırılmış, tek UART taskı ve callback seti doğrulandı. Bağımsız incelemede kritik/önemli regresyon yok: ortak102 fonksiyondan101'i isim/yorum/boşluk dışında aynı, servis gövdesindeki üç helper eski işlem/kilit/callback sırasını koruyor.
+
+CH34011 veri/yük +1 ölçüm +1 tekrar sıra/yanlış boyut kontrolü, toplam13/13 geçti. Boş hatta10sn/0 UART servis turu.100Hz çift yön1000TX/1000RX,10073ms, ölçülen servis+ISR%1,481; sürekli64bayt1000TX/1000RX,5707ms,%7,8. Stack boş386/512word; max kritik968cycle, IRQ1802cycle, RX latency9134cycle, frame handler2820cycle, result handler717cycle, service44345cycle. Önceki tam task CPU ölçümü ve native test/plan açıkları bu çalışmayla kapanmış sayılmaz; jumper çıkarılmış olduğundan native loopback kabulü yeniden koşulmadı.
+
+Kanıtlar `.build/readability-ide-build.log`, `readability-native-build.log`, `readability-serial-build.log`, `readability-production-build.log`; `.build/board-tests/readability-ch340-results.json`, `readability-ch340-metrics.json`, `readability-ch340-order.json`, `readability-serial-smoke.log`, `readability-production-smoke.log`.
+
+Firmware SHA256:
+
+- Native test `readability-native.elf`: `39d7f92f5bf11394406bd81af85cbb5e1538f3722c94057425af94d33301f4f6`.
+- CH340 test `readability-ch340.elf`: `6d414151be6f2551b9eef5329f9d5efc3b1fb6a4dcd0559ba3a5d00359b8c8c8`.
+- **Güncel kart firmware'i** üretim `readability-production.elf`: `bdd5f6d7f25e0b8b6d2f4b3adbbf326ed3b194b70ec6ba9500619de502c41f65`; initialized1, rx_ready1, tx_accepting1, TX_IDLE, tasks4. Üretim text46240/data96/bss25088; önceki düzenlemeye göre text+48bayt, RAM aynı.
+
+Son kartta üretim firmware'i var. `.ioc`/generated donanım ayarları korunur. Commit/push yapılmadı.

@@ -1,19 +1,139 @@
-/*
- * parser.c
- *
- * Kayan aday penceresi yaklasimi:
- *   gelen her bayti tamponun sonuna ekle, sonra tamponun BASINDAN cerceve
- *   cozmeyi dene. Cozulemezse SADECE BIR BAYT at ve tekrar dene.
- *
- * Cekirdek karar: hicbir bayt "islendi" diye atilmaz, yalnizca kanitlandiginda
- * atilir. Bir bayt atmak, bozuk adayin ICINDE baslayan gercek bir cercevenin
- * kaybolmamasini saglar.
+/* Cerceve protokolu: CRC, gonderim olusturma ve alim ayristirma.
+ * Donanim ve saat yonetimi cagirana aittir.
  */
+#include "protocol.h"
 #include <stddef.h>
 #include <string.h>
-#include "parser.h"
-#include "crc16.h"
 
+/* --- CRC-16/CCITT-FALSE --- */
+#define CRC16_POLY   0x1021U
+#define CRC16_INIT   0xFFFFU
+
+uint16_t crc16_ccitt(const uint8_t *data, uint16_t len)
+{
+    uint16_t crc = CRC16_INIT;
+    uint16_t i;
+    uint8_t  bit;
+
+    if (data == NULL)
+    {
+        return crc;
+    }
+
+    for (i = 0U; i < len; i++)
+    {
+        /* Bayti crc'nin ust yarisina XOR'la: reflect in = false oldugu icin
+           bitler en anlamlidan isleniyor. */
+        crc ^= (uint16_t)((uint16_t)data[i] << 8);
+
+        for (bit = 0U; bit < 8U; bit++)
+        {
+            if ((crc & 0x8000U) != 0U)
+            {
+                /* Ust bit 1: kaydir ve polinomu uygula */
+                crc = (uint16_t)((uint16_t)(crc << 1) ^ CRC16_POLY);
+            }
+            else
+            {
+                /* Ust bit 0: sadece kaydir */
+                crc = (uint16_t)(crc << 1);
+            }
+        }
+    }
+
+    return crc;   /* XOR out = 0x0000, ek islem yok */
+}
+
+/* --- Cerceve olusturma --- */
+/* 16 bit degeri little-endian yazar (dusuk bayt once).
+   Ad sonundaki _le kasitli: endianness cagri yerinde gorunur olmali.
+   Donus: yazilan bayt sayisi, her zaman FRAME_CRC_SIZE kadar (2). */
+
+
+   static uint8_t put_u16_le(uint8_t *buf, uint16_t value)
+{
+    buf[0] = (uint8_t)(value & 0xFFU);
+    buf[1] = (uint8_t)((value >> 8) & 0xFFU);
+    return 2U;
+}
+
+uint8_t frame_build(uint8_t *buf, uint8_t buf_size,
+                    uint8_t type, uint16_t seq,
+                    const uint8_t *payload, uint8_t payload_len)
+{
+    uint8_t  pos = 0U;   /* yazma imleci: siradaki bos indeks */
+    uint8_t  i;          /* payload kopyalama sayaci */
+    uint16_t crc;
+
+    /* --- 1) Kontroller: tek bayt yazmadan once hepsi.
+           Yarisi yazilmis bozuk bir cerceve birakmak, hic yazmamaktan
+           daha kotudur: cagiran donus degerini kontrol etmezse bozuk
+           veriyi hatta gonderir. --- */
+    if (buf == NULL)
+    {
+        return 0U;
+    }
+
+    if ((payload == NULL) && (payload_len > 0U))
+    {
+        return 0U;
+    }
+
+    if (payload_len > FRAME_MAX_PAYLOAD)
+    {
+        return 0U;
+    }
+
+    /* Toplami 16 bitte hesapla: 8 bit aritmetikte tasma riski olmasin.
+       Boylece bu satirin dogrulugu bir ustteki kontrolun varligina
+       bagli kalmiyor. */
+    if ((uint16_t)buf_size < ((uint16_t)FRAME_OVERHEAD + (uint16_t)payload_len))
+    {
+        return 0U;
+    }
+
+    /* --- 2) Baslik --- */
+    buf[pos++] = FRAME_SYNC0;
+    buf[pos++] = FRAME_SYNC1;
+    buf[pos++] = PROTOCOL_VERSION;
+    buf[pos++] = type;
+    buf[pos++] = payload_len;          /* LENGTH: sadece payload boyutu */
+
+    pos += put_u16_le(&buf[pos], seq);
+
+    /* --- 3) Payload --- */
+    for (i = 0U; i < payload_len; i++)
+    {
+        buf[pos++] = payload[i];
+    }
+
+    /* --- 4) CRC ---
+       Bu noktada pos = FRAME_HEADER_SIZE + payload_len.
+       CRC, VERSION alanindan payload sonuna kadar hesaplanir. */
+    crc = crc16_ccitt(&buf[FRAME_OFF_VERSION],
+                      (uint16_t)(pos - FRAME_OFF_VERSION));
+
+    pos += put_u16_le(&buf[pos], crc);
+
+    return pos;   /* toplam yazilan bayt sayisi */
+}
+
+uint8_t frame_build_joystick(uint8_t *buf, uint8_t buf_size,
+                             int16_t x, int16_t y, uint16_t seq)
+{
+    uint8_t payload[4];
+
+    /* Isaretli degerleri once uint16_t'ye cevir: bit islemleri isaretsiz
+       tiplerde yapilir, isaret yorumu karsi tarafa birakilir. */
+    (void)put_u16_le(&payload[0], (uint16_t)x);
+    (void)put_u16_le(&payload[2], (uint16_t)y);
+
+    return frame_build(buf, buf_size,
+                       FRAME_TYPE_JOYSTICK, seq,
+                       payload, (uint8_t)sizeof(payload));
+}
+
+/* --- Bayt akisindan cerceve ayristirma --- */
 /* Cozme denemesinin sonucu */
 typedef enum
 {

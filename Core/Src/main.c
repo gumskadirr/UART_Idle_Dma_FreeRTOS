@@ -25,7 +25,7 @@
 #include "uart_comm.h"
 #include "app_protocol.h"
 #ifdef UART_COMM_TEST
-#include "uart_comm_test.h"
+#include "uart_comm_internal.h"
 #include "tests.h"
 #include "uart_comm_tests.h"
 #include "uart_rtos_tests.h"

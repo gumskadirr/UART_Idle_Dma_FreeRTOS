@@ -1,6 +1,6 @@
 # UART: kullanım, çalışma yapısı ve sadeleştirme incelemesi
 
-İnceleme tarihi: 6 Ekim 2026. Bu çalışma yalnız bu belgeyi günceller; kaynak kodu, dosya yerleri, proje ayarları ve kart firmware'i değiştirilmez. Sadeleştirme bölümündeki yapı öneridir; henüz uygulanmamıştır.
+Güncelleme: 6 Ekim 2026. Testler ayrı klasöre taşındı; frame/parser/CRC tek protokol modülünde birleştirildi. Bu belge güncel kullanım ve dosya düzenini açıklar.
 
 RX ve TX'in tamamı `Core/Src/uart_comm.c` içindedir. Uygulama yalnız `Core/Inc/uart_comm.h` kullanır. Tek `UartCommTask`, circular RX DMA'yı ve normal TX DMA'yı yönetir; iş yokken notification ile süresiz uyur.
 
@@ -18,6 +18,20 @@ Uygulama yazarken dört UART fonksiyonu yeterlidir:
 `uart_comm_on_uart_irq_exit()` IRQ bağlantısına aittir; uygulama bu fonksiyonu çağırmaz. `rx_service`, `tx_service` gibi iç fonksiyonlarla ayrıca servis döngüsü kurulmaz.
 
 Okuma sırası: `main.c` başlangıç → `uart_comm.h` uygulama arayüzü → `app_protocol.c` gelen verinin kullanımı. Yalnız sürücüyü anlamak/değiştirmek gerektiğinde `uart_comm.c` içindeki ayrıntılara geçilir.
+
+## uart_comm.c içindeki okuma sırası
+
+Dosya bölümleri: ortak context/tamponlar ve kritik bölüm → RX DMA/ayrıştırma → RX toparlanma → TX DMA → kuyruk/sonuç/snapshot → owner task → public API → HAL callback/IRQ. İç yardımcılar `rx_`, `tx_` veya `comm_` önekiyle sorumluluğunu belirtir. Test kancaları ve DWT ölçümleri koşullu test bölümlerindedir.
+
+Ana servis turu `comm_service_once()` içinde şu sırayla çalışır:
+
+1. RX ve TX durumlarını ilerletir; TX FAULT ise kabul kapısını kapatır.
+2. `comm_deliver_pending_tx_result()` aktif gönderimin sonucunu callback'e teslim eder.
+3. `comm_service_recovery_requests()` kaydedilmiş RX/TX kurtarma isteklerini işler.
+4. `comm_service_tx_queue()` en fazla bir kuyruk öğesini başlatır veya iptal eder.
+5. `comm_publish_snapshot()` güncel durumu yayımlar; task sonraki işi/deadline'ı hesaplayıp bekler.
+
+Bu ayrım işlem ve kilit sırasını korur. Public API dört UART fonksiyonu olarak kalır; uygulama bu iç yardımcıları çağırmaz. Kullanılmayan eski `rx_drain()` kapısı kaldırılmıştır. Düzenleme yeni dosya veya ek UART taskı oluşturmaz; amacı akışı kolay okumaktır.
 
 ## Çalışma yapısı
 
@@ -78,7 +92,7 @@ Include'lar USER CODE Includes, dosya düzeyindeki callback ve handler tanımı 
 ```c
 #include "uart_comm.h"
 #include "app_protocol.h"
-#include "frame.h"
+#include "protocol.h"
 #include <stddef.h>
 
 static void tx_result(const uart_comm_tx_result_t *result, void *user)
@@ -158,7 +172,7 @@ STM32F407VG/168 MHz; USART2 PA2–PA3, 115200 8N1; RX DMA1 Stream5 Channel4 circ
 
 HAL tick TIM6'dan, RTOS tick SysTick'ten gelir; RTOS 1000 Hz. NVIC GROUP4; USART2 ve iki DMA IRQ önceliği 5, max syscall önceliği 5, 4 priority bit. `uart_comm_init` tek statik UART taskını priority 25 ve 512 `StackType_t` (2048 bayt) stack ile kurar; mevcut defaultTask priority 24'tür. Üretimde boş defaultTask suspend olur. Daha yüksek öncelikli uygulama yükü eklenirse RX hizmet gecikmesi yeniden ölçülmelidir; 256 bayt halka yaklaşık 22,2 ms'de dolar.
 
-HAL callback'leri modülde tek tanımlıdır. `USART2_IRQHandler` USER CODE çıkışında `uart_comm_on_uart_irq_exit()` çağrılır. Kullanıcı ikinci callback/servis/HAL sahibi eklememelidir. `uart_comm_test.h` uygulama arayüzü değildir.
+HAL callback'leri modülde tek tanımlıdır. `USART2_IRQHandler` USER CODE çıkışında `uart_comm_on_uart_irq_exit()` çağrılır. Kullanıcı ikinci callback/servis/HAL sahibi eklememelidir. `uart_comm_internal.h` uygulama arayüzü değildir.
 
 ## Doğrulama
 
@@ -189,71 +203,64 @@ TYPE 0x70 echo, 0x71 fixture kontrolü, 0x72 bağımsız kart TX akışı, 0x73 
 
 Test bitince `tools/build.sh` ile test tanımları kapalı üretim derlemesi hazırlanır ve `python tools/run_board_tests.py --production --elf .build/UART_IDLE_DMAv2.elf` ile geri yüklenir. Normal CubeIDE Debug kabul koşusu hâlâ PA2–PA3 loopback gerektirir; CH340 bağlıyken yanlışlıkla o firmware yüklenmemelidir.
 
-## Dosyalar: hangisi ne için var?
+## Dosya düzeni
 
-İnceleme anında `Core/Src` içinde16 `.c`, `Core/Inc` içinde13 `.h`, toplam29 dosya vardır. Drivers, Middlewares ve startup dosyaları bu sayıya dahil değildir.
+Uygulama için üç modül yeterlidir:
 
-| Grup | Dosyalar | Rolü |
+| Modül | Kaynak / başlık | Sorumluluk |
 |---|---|---|
-| UART taşıma | `uart_comm.c/.h` | Tek owner task, RX/TX DMA, FIFO, hata/kurtarma, public API |
-| Protokol oluşturma | `frame.c/.h` | Başlık, payload ve CRC ile gönderilecek baytları kurar |
-| Protokol ayrıştırma | `parser.c/.h` | Bayt akışını doğrulanmış çerçevelere dönüştürür |
-| Ortak CRC | `crc16.c/.h` | Frame ve parser'ın kullandığı aynı CRC hesabı |
-| Uygulama davranışı | `app_protocol.c/.h` | Joystick ve uygulama SEQ durumu |
-| İç sürücü/test bağlantısı | `uart_comm_test.h` | İç RX/TX türleri, sabitler, prototipler ve test erişimi |
-| Kart testleri | `tests.c/.h`, `uart_comm_tests.c/.h`, `uart_rtos_tests.c/.h` | Birim, çekirdek, RTOS ve CH340 kabul testleri |
-| CubeMX/platform | `main.c/.h`, `stm32f4xx_it.c/.h`, `stm32f4xx_hal_msp.c`, `stm32f4xx_hal_timebase_tim.c`, `stm32f4xx_hal_conf.h`, `FreeRTOSConfig.h`, `system_stm32f4xx.c`, `syscalls.c`, `sysmem.c`, `freertos.c` | Donanım, kesme, RTOS ve çalışma ortamı bağlantıları |
+| UART | `Core/Src/uart_comm.c`, `Core/Inc/uart_comm.h` | RX/TX DMA, tek owner task, TX kuyruğu ve hata toparlama |
+| Protokol | `Core/Src/protocol.c`, `Core/Inc/protocol.h` | Çerçeve oluşturma, CRC ve akış ayrıştırma; HAL/RTOS bağımsız |
+| Uygulama | `Core/Src/app_protocol.c`, `Core/Inc/app_protocol.h` | SEQ takibi, joystick X/Y ve tutarlı snapshot |
 
-Özel üretim C kaynakları toplam1810 satır: UART1303, parser252, uygulama110, frame99, CRC46. Üç kart test kaynağı toplam3949 satırdır. Sayılara yorumlar ve boş satırlar dahildir; bu bir firmware boyutu ölçümü değildir. Üretim derlemesinde test gövdeleri `UART_COMM_TEST` ile dışarıda kalır. Karmaşanın önemli kısmı, test ve üretim dosyalarının aynı klasörde görünmesidir.
+`protocol.c` içinde CRC, çerçeve oluşturma ve ayrıştırma olmak üzere üç bölüm vardır. Önceki `frame_build`, `frame_build_joystick`, `frame_parser_*`, `crc16_ccitt` fonksiyonlarının imzaları ve davranışı korunur. Yeni uygulama örneklerinde `protocol.h` kullanılır; eski frame/parser/CRC header'ları kaldırılmıştır.
 
-`uart_comm_test.h` adına rağmen yalnız test dosyası değildir: `uart_comm.c` bunu üretimde de içerir. İç türler/sabitler buradan geldiği için doğrudan silinemez. `freertos.c` şu anda yalnız include ve boş USER CODE alanlarından oluşur; task kurulumları `main.c`/`uart_comm.c` içindedir.
+`Core/Inc/uart_comm_internal.h` sürücünün private tanımları ve `UART_COMM_TEST` kapılı test erişimidir. Uygulama bu başlığı kullanmaz. `app_proto_state` artık dosya içidir; uygulama ve testler durum değerlerini `app_protocol_get_snapshot()` ile okur. Snapshot mevcut kesme maskesini korur.
 
-## Sadeleştirme önerisi — uygulanmadı
+Kart testleri `Tests/Src` ve `Tests/Inc` içinde üç C/H çifti olarak korunur: `tests`, `uart_comm_tests`, `uart_rtos_tests`. PC model testleri `tools/tests` içindedir. Test derlemesinde `Tests/Inc` include yolu ve `Tests` kaynak klasörü CubeIDE Debug/Release yapılandırmalarına eklenmiştir. Test gövdeleri `UART_COMM_TEST` kapalıyken firmware'e girmez.
 
-Önerim: **UART taşıma, protokol ve uygulama olmak üzere üç anlaşılır modül bırakmak.** Testler ayrı klasörde görünür. Yeni sınıf, genel plugin sistemi, dinamik dispatch veya ikinci UART sahibi eklemeye ihtiyaç yoktur.
+Core'daki C/H sayısı **29 → 19** oldu. Altı test dosyası taşındı; protokolün altı dosyası iki dosyaya indi. Proje genelindeki gerçek kaynak dosyası azalması **4**. Generated platform, HAL ve FreeRTOS dosyaları korunur; `.ioc`, pinler, baud, IRQ öncelikleri ve RTOS zamanlama ayarları değişmez.
 
-### 1. Testleri ayrı klasöre taşı
+Kök klasörde üç güncel belge bulunur: bu kullanım belgesi, [birleşik mimari/yol haritası](UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md) ve [RTOS uygulama/ölçüm kaydı](UART_RTOS_UYGULAMA_PLANI.md). Beş eski belge `docs/archive` altına taşınmıştır; test/hash/karar kayıtları silinmemiştir:
 
-`tests`, `uart_comm_tests`, `uart_rtos_tests` C/H çiftleri `Tests/Src` ve `Tests/Inc` altında toplanabilir. Altı dosya korunur; test kanıtı kaybedilmez. `uart_comm_test.h` iç sürücü tanımlarını da taşıdığı için ilk aşamada yerinde kalır.
+- [Önceki mimari](docs/archive/MIMARI.md)
+- [İlk geliştirme planı](docs/archive/UART_GELISTIRME_PLANI.md)
+- [RX/TX/RTOS referans planı](docs/archive/UART_RX_TX_RTOS_YOL_HARITASI.md)
+- [Önceki TX doğrulama kaydı](docs/archive/UART_UYGULAMA_DURUMU.md)
+- [Önceki bulguların kapanışı](docs/archive/ACIK_BULGULAR.md)
 
-Bu adım toplam dosya sayısını azaltmaz; Core görünümünü29'dan23 dosyaya indirir. CubeIDE kaynak/include yolları ve Python derleme listeleri güncellenmelidir. Debug tarafından üretilen `subdir.mk` kalıcı çözüm olarak elle düzenlenmez. Test .c dosyalarını tek4000 satırlık dosyada toplamak dosya sayısını azaltır ama okunabilirliği kötüleştirir; önerim bu değildir.
+Arşiv belgelerindeki eski API ve dosya adları tarihsel bilgidir. CubeMX yeniden kod ürettiğinde custom `Tests` kaynak/include kayıtlarını koruduğunu kontrol et. Komut satırı derlemesi IDE'nin ürettiği kaynak listesini kullandığı için kaynak taşımadan sonra CubeIDE'de yeniden derleme gerekir; `Debug/subdir.mk` elle düzenlenmez.
 
-### 2. Frame, parser ve CRC'yi tek protokol modülünde birleştir
+## Sadelik için korunan sınırlar
 
-`frame.c/.h`, `parser.c/.h`, `crc16.c/.h` birlikte `protocol.c/.h` olabilir: altı dosya yerine iki dosya, **toplam dört dosya azalması**. Bunlar aynı bayt formatını paylaşır; saf C ve HAL/RTOS bağımsız kalabilirler. Yeni dosya yaklaşık400 satır C içeriği taşır; içeride CRC, frame oluşturma ve parser olarak üç kısa bölüm yeterlidir.
+DMA sayaçları, kopya doğrulaması, fiziksel duruş kanıtı, sınırlı toparlanma ve kabul edilen TX başına tek sonuç sözleşmesi korunur. Bu kontroller önceki hata testlerinin kapsadığı davranışlardır. `app_protocol` main içine taşınmaz; uygulama davranışı UART'dan ayrı kalır. Boş generated `freertos.c` ve defaultTask korunur; defaultTask kart testlerini başlatır. Bunların kaldırılması ayrı başlangıç/kabul çalışması gerektirir.
 
-Mevcut `frame_build`, `frame_build_joystick`, `frame_parser_*` davranışı ve payload ömrü korunur. UART header'ındaki `parser.h` bağımlılığı ve uygulama/test include'ları yeni `protocol.h` için güncellenir. CRC birim testlerinin erişimi korunmadan eski header silinmez. Kodun algoritmaları sırf dosya birleşti diye kısaltılmak zorunda değildir.
+## Sadeleştirme uygulama planı — 6 Ekim 2026
 
-İlk iki adım birlikte: Core29→19 dosya; proje genelinde gerçek azalma4 dosyadır. Production'a özel beş C/H çifti, üç C/H çiftine iner: `uart_comm`, `protocol`, `app_protocol`. Generated platform dosyaları ayrı kalır.
+Kullanıcının onayladığı sadeleştirme mevcut çalışma klasöründe uygulandı. Yeni bağımlılık, `.ioc` değişikliği ve UART davranış değişikliği yoktur.
 
-### 3. İç sürücü arayüzünü anlaşılır hale getir
+- [x] Başlangıç: RX31, TX23 ve RTOS16 model kontrolü geçti.
+- [x] Kart testlerinin üç C/H çiftini `Tests/Src` ve `Tests/Inc` altına taşı; CubeIDE Debug/Release kaynak ve include listelerini güncelle.
+- [x] Frame/parser/CRC içeriğini `protocol.c/.h` altında birleştir; fonksiyon imzalarını, CRC parametrelerini ve ayrıştırma algoritmasını koru. Model derleme listelerini güncelle.
+- [x] Eski `uart_comm_test.h` başlığını `uart_comm_internal.h` olarak adlandır; uygulama durumunu private yap ve testleri mevcut snapshot API'sine geçir.
+- [x] Beş tarihsel belgeyi `docs/archive` altına taşı; Markdown bağlantılarını ve güncel dosya düzenini düzelt.
+- [x] RX/TX/RTOS modellerini yeniden çalıştır. CubeIDE Debug/Release, normal test, CH340 test ve üretim firmware'lerini tam derle; test sembollerinin üretim ELF'ine girmediğini kontrol et.
+- [x] Bağlı kartta CH340 veri/yük/süre kontrollerini yeniden çalıştır ve üretim firmware'ini geri yükle; sonucu bu belgede kaydet.
 
-`uart_comm_test.h` içindeki üretime gereken tanımların private rolü daha açık adlandırılabilir veya C dosyasına alınabilir. Teste açılan fonksiyonlar ayrı test bölümünde kalır. Yeniden adlandırma tek başına dosya sayısını azaltmaz; amaç uygulama geliştiricisinin bu199 satırlık iç arayüzü kullanmak zorunda sanmamasıdır.
+İnceleme odağı: eski kaynakların yanlışlıkla linklenmesi, test dosyalarının IDE kaynak listesinden düşmesi, farklı build kiplerinden nesne sızması, snapshot sırasında PRIMASK'ın korunması ve arşiv bağlantılarının bozulması. Mevcut davranış testleri yeniden kullanılır; sırf dosya taşımasını taklit eden yeni test eklenmez.
 
-`app_proto_state` gibi doğrudan erişilebilir globals yerine snapshot tek okuma yolu olabilir. Testlerin mevcut erişimleri uyarlanmalıdır. `app_protocol.h` içindeki eski `uart_rx.c`/"M1'de taşınacak" anlatımı da artık tarihsel bilgidir; güncel sorumluluk açıklamasıyla kısaltılabilir. Bu, davranış değişikliği gerektirmeyen bir okunabilirlik iyileştirmesidir.
+### Dosya düzeni sadeleştirmesi sonrası doğrulama
 
-### 4. Diğer dosya azaltma seçenekleri
+PC modelleri RX31/31, TX23/23, RTOS16/16; kart protokol birim testleri29/29 geçti. CubeIDE Debug/Release ile komut satırı normal test, CH340 test ve üretim derlemeleri hatasız ve uyarısız tamamlandı. Üretim ELF'inde test/fixture sembolleri yok; tek `UartCommTask` ve callback seti korundu. Bağımsız incelemede kritik/önemli regresyon bulunmadı; protokol fonksiyon gövdeleri ve API tanımları eski içerikle aynı.
 
-| Seçenek | Kazanç | Değerlendirme |
-|---|---|---|
-| Boş `freertos.c`'yi kaldırmak | 1 dosya | Şu an fonksiyon tanımlamıyor; fakat CubeMX üretebilir. Proje kaynak listesi ve yeniden üretim süreci kontrol edilmeden silinmez. Öncelikli kazanç değildir. |
-| `app_protocol.c/.h` işini main USER CODE'a taşımak | 2 dosya | Yalnız sabit joystick uygulaması için mümkün; main'i büyütür ve başka taskların uygulama arayüzünü zorlaştırır. Ayrı iki küçük dosyayı korumak daha anlaşılır. |
-| Tüm özel üretim kodunu `uart_comm.c/.h` içine koymak | 8 dosya | Özel10 dosya2 olur; C dosyası yaklaşık1810 satıra çıkar, uygulama ve protokol UART'a bağlanır. Dosya sayısı azalır ama karmaşa artar. Önerilmiyor. |
-| Eski beş MD belgesini arşiv klasörüne taşımak | Kök görünümü8→3 MD | Toplam dosya sayısı değişmez; hangi belgenin güncel olduğu netleşir. Bağlantılar güncellenir, eski test kanıtı korunur. |
-| Beş geçmiş MD'yi tek tarihçe belgesinde birleştirmek | 4 belge dosyası | Gerçek azalma sağlar; karar/test/hash kayıtları çıkarılmadan ve tarihleri korunarak yapılabilir. Uzun tarihçe normal kullanım belgesine eklenmez. |
+CH340 kontrolleri13/13 geçti. 10sn boş hatta UART servis turu0; 100Hz çift yönde1000/1000 çerçeve ve ölçülen servis+ISR payı%1,476. Kritik bölüm965cycle (5,74µs), IRQ1818cycle (10,82µs), RX gecikmesi7795cycle (46,40µs); stack boş360/512word. Tam task CPU runtime hedefi bu kısmi ölçümle kapatılmaz.
 
-Kök klasörde güncel üç belge: bu kullanım/inceleme belgesi, `UART_BIRLESIK_MIMARI_VE_UYGULAMA_YOL_HARITASI.md` şartnamesi, `UART_RTOS_UYGULAMA_PLANI.md` sonuç kaydı. Arşiv adayları: `MIMARI.md`, `UART_GELISTIRME_PLANI.md`, `UART_RX_TX_RTOS_YOL_HARITASI.md`, `UART_UYGULAMA_DURUMU.md`, `ACIK_BULGULAR.md`. Bunların eski anlatımı güncel API yerine kullanılmaz.
+Dosya düzeni sadeleştirmesi sonunda karta bırakılan firmware: `.build/board-tests/simplify-production.elf`, SHA256 `3f5f8410563ac0337fcc1f0f298c5e08673414bdc52bdcaccfb3a2d6dab1c227`; başlangıçta initialized/RX-ready/TX-accepting1 ve task sayısı4 doğrulandı. CH340 sonuç JSON'ları ve build logları `.build` altında, ayrıntılı kanıt [RTOS uygulama kaydında](UART_RTOS_UYGULAMA_PLANI.md). PA2–PA3 jumper'ı çıkarılmış olduğundan eski native loopback15/15 ve kabul71/71 koşusu bu sadeleştirme için tekrar edilmedi; geçmiş kayıt korunur.
 
-### 5. Satır sayısı için kaldırılmaması gerekenler
+### uart_comm okunabilirlik düzenlemesi sonrası doğrulama
 
-DMA üretici/tüketici sayaçları, kopya öncesi/sonrası doğrulama, hata nesli, fiziksel duruş kanıtı, toparlanma bütçesi, FAULT kabul kapısı ve kabul edilen öğe başına tek sonuç sözleşmesi gereksiz katmanlar değildir. Önceki hata testlerinin koruduğu işlevlerdir. Modulo konumla RX sayımı, sınırsız retry veya task içinde bloklayan HAL gönderimiyle değiştirilmeleri önerilmez.
+6 Ekim 2026: İç yardımcılar RX/TX/ortak sorumluluğuna göre adlandırıldı, ana servis üç yardımcı adıma ayrıldı, callback/IRQ tanımları dosyanın sonunda toplandı, çok işlemli satırlar açıldı ve kullanılmayan `rx_drain` kaldırıldı. `comm_service_once`67→27 satır; toplam dosya1303→1364 satır oldu. Satır artışı bölüm başlıkları ve açık fonksiyon/satır düzeninden gelir; yeni dosya, task veya davranış eklenmedi. Public API ve kilit/işlem sırası korunur.
 
-İç HAL TX sonucu ile public kuyruk kabul sonucunun farklı olması da anlamlıdır: yerel kuyruğa kabul ile DMA başlatma/tamamlama farklı aşamalardır. Sırf enum sayısını azaltmak için bunlar birbirine karıştırılmaz. Snapshot yayınındaki açık alan kopyaları okunabilir; kısa görünmesi için çok katmanlı makro sistemi eklemek uygun değildir.
+PC modelleri70/70, CH34013/13 geçti. CubeIDE Debug/Release ile normal test/CH340/üretim tam derlemeleri0 hata/0 uyarı; üretimde test kancaları yok ve tek UART taskı/callback seti var. Bağımsız inceleme yeni kritik/önemli regresyon bulmadı. Boş hatta10sn/0 UART turu;100Hz çift yön1000/1000 çerçevede ölçülen servis+ISR payı%1,481. Boş stack386/512word, kritik bölüm968cycle (5,76µs), IRQ1802cycle (10,73µs). Tam task runtime hedefi bu ölçümle kapatılmaz.
 
-Boş defaultTask, timer taskı veya CMSIS katmanı daha sonra ayrıca değerlendirilebilir. Bunlar dosya taşıma değildir; kernel başlangıcı, statik bellek hook'ları ve test taskı başlatma akışını etkiler. Özellikle defaultTask kart testlerini başlattığından doğrudan kaldırılması testlerin hiç çalışmamasına yol açabilir. HAL/FreeRTOS/Drivers dosyaları da include/build/config ilişkileri incelenmeden "fazlalık" diye silinmez.
-
-## Önerilen ilerleme
-
-Önce testleri ve eski belgeleri görünümde ayır; sonra yalnız protokol C/H çiftlerini birleştir. `app_protocol` ve tek `uart_comm` sahibi korunur. Generated kod, `.ioc`, pinler ve peripheral ayarları bu düzenleme için değişmek zorunda değildir. Uygulama eklemesi USER CODE alanlarına yapılır.
-
-İleride uygulanırsa PC RX/TX/RTOS modelleri, normal test/üretim tam derlemeleri, CH340 veri/yük/süre testleri ve üretimde test sembollerinin olmaması yeniden doğrulanır. Test taşıma yolları ve ADC gibi ilgisiz peripheral ayarları aynı değişikliğe karıştırılmaz. Bu belgede öneriler hazırlanmıştır; hiçbir kaynak dosya birleştirilmemiş, taşınmamış veya silinmemiştir.
+**Güncel kart firmware'i** `.build/board-tests/readability-production.elf`, SHA256 `bdd5f6d7f25e0b8b6d2f4b3adbbf326ed3b194b70ec6ba9500619de502c41f65`. Üretim RX/TX başlangıcı doğrulandı ve kartta bırakıldı. Güncel kanıtlar `readability-ch340-results.json`, `readability-ch340-metrics.json`, `readability-ch340-order.json`, `readability-production-smoke.log` dosyalarındadır. Commit/push yapılmadı.
