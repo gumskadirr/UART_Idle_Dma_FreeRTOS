@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "uart_comm.h"
 #include "app_protocol.h"
+#include "protocol_uart.h"
 #ifdef UART_COMM_TEST
 #include "uart_comm_internal.h"
 #include "tests.h"
@@ -88,7 +89,10 @@ static void on_tx_result(const uart_comm_tx_result_t *result, void *user)
     uart_last_tx_result = *result;
     uart_tx_result_count++;
 }
-static const uart_comm_handlers_t uart_handlers = {app_protocol_on_frame, on_tx_result, NULL};
+static protocol_uart_t uart_protocol;
+static const uart_comm_handlers_t uart_handlers = {
+    .on_rx = protocol_uart_on_rx, .on_tx_result = on_tx_result, .rx_user = &uart_protocol
+};
 #endif
 /* USER CODE END 0 */
 
@@ -128,7 +132,7 @@ int main(void)
   /* Eski cekirdek regresyonu scheduler oncesi; uretimde bu kapilar yok. */
   birim_testleri_kosur();
   app_protocol_init();
-  rx_set_handler(app_protocol_on_frame, NULL);
+  test_rx_set_handler(app_protocol_on_frame, NULL);
   rx_start_status = rx_start(&huart2);
   if (tx_init(&huart2) != HAL_OK) Error_Handler();
   loopback_testi_kosur(&huart2);
@@ -136,6 +140,9 @@ int main(void)
   comm_test_stop_before_scheduler();
 #endif
   app_protocol_init();
+#ifndef UART_COMM_TEST
+  protocol_uart_init(&uart_protocol, app_protocol_on_frame, NULL);
+#endif
 /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -163,8 +170,10 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_THREADS */
 #ifdef UART_COMM_SERIAL_TEST
+  uart_serial_test_init_handlers();
   if (uart_comm_init(&huart2, &uart_serial_test_handlers) != HAL_OK) Error_Handler();
 #elif defined(UART_COMM_TEST)
+  uart_rtos_test_init_handlers();
   if (uart_comm_init(&huart2, &uart_rtos_test_handlers) != HAL_OK) Error_Handler();
 #else
   if (uart_comm_init(&huart2, &uart_handlers) != HAL_OK) Error_Handler();

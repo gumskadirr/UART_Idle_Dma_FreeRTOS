@@ -21,6 +21,9 @@
 /* Bu basligin ICERIGI yalnizca UART_COMM_TEST derlemesinde vardir (P0).
    Uretim derlemesinde dosya dahil edilse bile hicbir sey tanimlamaz. */
 #ifdef UART_COMM_TEST
+#include "protocol_uart.h"
+void test_rx_set_handler(frame_handler_t handler, void *user);
+const frame_parser_t *test_rx_parser(void);
 /* Bare-metal test owner'i TX sonuc kutusunu her tur tuketir. */
 void test_tx_service(void);
 

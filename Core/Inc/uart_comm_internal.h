@@ -2,7 +2,6 @@
 #ifndef UART_COMM_INTERNAL_H
 #define UART_COMM_INTERNAL_H
 #include "uart_comm.h"
-#include "protocol.h"
 #ifdef UART_COMM_TEST
 #define UART_LOCAL
 #else
@@ -69,6 +68,8 @@ typedef struct {
     uint32_t max_frame_handler_cycles, max_result_handler_cycles;
 } comm_test_profile_t;
 void comm_test_get_profile(comm_test_profile_t *out);
+void comm_test_frame_enter(void);
+void comm_test_frame_exit(void);
 void comm_test_irq_enter(void);
 void comm_test_irq_exit(void);
 void comm_test_pause_owner(uint8_t pause);
@@ -83,7 +84,7 @@ UART_LOCAL void rx_service(void);
 
 /* Handler start oncesi STOPPED/FAULT'ta kurulur. Kisa calisir, HAL/service
  * cagirmaz. Payload yalniz callback suresince gecerlidir; saklanacaksa kopyala. */
-UART_LOCAL void rx_set_handler(frame_handler_t handler, void *user);
+UART_LOCAL void rx_set_handler(uart_comm_rx_handler_t handler, void *user);
 
 /* En fazla budget bayt tuketir. 1: hemen islenebilir veri kaldi.
  * Ertelenmis sample 0 doner; sonraki servisi next_wait_ms planlar.
@@ -106,7 +107,6 @@ UART_LOCAL uint8_t rx_is_quiescent(void);
 UART_LOCAL uint8_t rx_get_produced(uint32_t *out);
 UART_LOCAL uint32_t rx_get_consumed(void);
 UART_LOCAL uint32_t rx_producer_from(uint32_t wrap_base, uint8_t pending_tc, uint32_t ndtr);
-UART_LOCAL const frame_parser_t *rx_get_parser(void);
 
 /* IRQ/HAL bildirim kapilari. Callback senkron da gelebilir; karar owner'da.
  * UART IRQ cikis kancasi HAL_UART_IRQHandler'dan sonra cagrilir. */
@@ -130,7 +130,7 @@ UART_LOCAL uint8_t rx_test_recovery_active(void);
 UART_LOCAL uint32_t rx_test_get_session(void);
 UART_LOCAL uint32_t rx_test_get_wrap_base(void);
 #endif
-#define UART_TX_BUF_SIZE FRAME_MAX_SIZE
+#define UART_TX_BUF_SIZE 64U
 #define UART_TX_TIMEOUT_MS 20U
 #define UART_TX_ABORT_TIMEOUT_MS 20U
 

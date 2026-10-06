@@ -393,9 +393,9 @@ static uint8_t r1_start_busy_durumu_korur(UART_HandleTypeDef *huart)
     rx_service();
     test_tx_service();
 
-    aday_len      = rx_get_parser()->len;
-    ok_once       = rx_get_parser()->frames_ok;
-    drop_once     = rx_get_parser()->bytes_dropped;
+    aday_len      = test_rx_parser()->len;
+    ok_once       = test_rx_parser()->frames_ok;
+    drop_once     = test_rx_parser()->bytes_dropped;
     gaps_once     = read_app_state().seq_gap_events;
     seq_once      = read_app_state().last_seq;
     restarts_once = rx_stats.restarts;
@@ -413,9 +413,9 @@ static uint8_t r1_start_busy_durumu_korur(UART_HandleTypeDef *huart)
     }
 
     /* Reddedilen cagri HICBIR SEYI degistirmemeli */
-    if ((rx_get_parser()->len           != aday_len)  ||
-        (rx_get_parser()->frames_ok     != ok_once)   ||
-        (rx_get_parser()->bytes_dropped != drop_once) ||
+    if ((test_rx_parser()->len           != aday_len)  ||
+        (test_rx_parser()->frames_ok     != ok_once)   ||
+        (test_rx_parser()->bytes_dropped != drop_once) ||
         (read_app_state().seq_gap_events  != gaps_once) ||
         (read_app_state().last_seq  != seq_once)  ||
         (rx_stats.restarts  != restarts_once) ||
@@ -434,12 +434,12 @@ static uint8_t r1_start_busy_durumu_korur(UART_HandleTypeDef *huart)
     rx_service();
     test_tx_service();
 
-    return (uint8_t)((rx_get_parser()->frames_ok ==
+    return (uint8_t)((test_rx_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
                      (read_app_state().last_seq == 601U) &&
                      (read_app_state().joy_x == 321) &&
                      (read_app_state().joy_y == -321) &&
-                     (rx_get_parser()->bytes_dropped == drop_once));
+                     (test_rx_parser()->bytes_dropped == drop_once));
 }
 
 
@@ -470,7 +470,7 @@ static uint8_t r1_baska_handle_reddedilir(UART_HandleTypeDef *huart)
     }
 
     /* Eski sahiplik bozulmadi mi: gercek handle hala alim yapiyor olmali */
-    ok_once = rx_get_parser()->frames_ok;
+    ok_once = test_rx_parser()->frames_ok;
     n = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve), 5, -5, 602U);
     if (n == 0U)
     {
@@ -484,7 +484,7 @@ static uint8_t r1_baska_handle_reddedilir(UART_HandleTypeDef *huart)
     rx_service();
     test_tx_service();
 
-    return (uint8_t)((rx_get_parser()->frames_ok ==
+    return (uint8_t)((test_rx_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
                      (read_app_state().last_seq == 602U) &&
                      (rx_get_phase() == UART_RX_PHASE_RUNNING));
@@ -1118,14 +1118,14 @@ static uint8_t r3_kopya_sirasinda_ezilme(UART_HandleTypeDef *huart)
 
     /* --- 1) Uretici kopya sirasinda bir tur sicriyor --- */
     c_once   = rx_get_consumed();
-    ok_once  = rx_get_parser()->frames_ok;
+    ok_once  = test_rx_parser()->frames_ok;
     red_once = rx_stats.copy_rejects;
 
     rx_test_set_copy_hook(UART_RX_COPY_HOOK_OVERWRITE);
     (void)rx_service_budget(UART_RX_SERVICE_BUDGET);
 
     if ((rx_get_consumed() != c_once) ||
-        (rx_get_parser()->frames_ok != ok_once) ||
+        (test_rx_parser()->frames_ok != ok_once) ||
         (rx_stats.copy_rejects != (uint16_t)(red_once + 1U)))
     {
         (void)r1_alimi_kur(huart);
@@ -1149,14 +1149,14 @@ static uint8_t r3_kopya_sirasinda_ezilme(UART_HandleTypeDef *huart)
     HAL_Delay(3U);
 
     c_once   = rx_get_consumed();
-    ok_once  = rx_get_parser()->frames_ok;
+    ok_once  = test_rx_parser()->frames_ok;
     red_once = rx_stats.copy_rejects;
 
     rx_test_set_copy_hook(UART_RX_COPY_HOOK_ERROR_GEN);
     (void)rx_service_budget(UART_RX_SERVICE_BUDGET);
 
     if ((rx_get_consumed() != c_once) ||
-        (rx_get_parser()->frames_ok != ok_once) ||
+        (test_rx_parser()->frames_ok != ok_once) ||
         (rx_stats.copy_rejects != (uint16_t)(red_once + 1U)))
     {
         (void)r1_alimi_kur(huart);
@@ -1166,7 +1166,7 @@ static uint8_t r3_kopya_sirasinda_ezilme(UART_HandleTypeDef *huart)
     /* Kanca kapandi: ayni veri bu kez normal cozulmeli (veri kaybolmadi) */
     (void)rx_service_budget(UART_RX_SERVICE_BUDGET);
 
-    return (uint8_t)((rx_get_parser()->frames_ok ==
+    return (uint8_t)((test_rx_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
                      (read_app_state().last_seq == 802U));
 }
@@ -1202,14 +1202,14 @@ static uint8_t r3_kopya_sonrasi_ornek_dustu(UART_HandleTypeDef *huart)
     HAL_Delay(3U);
 
     c_once      = rx_get_consumed();
-    ok_once     = rx_get_parser()->frames_ok;
+    ok_once     = test_rx_parser()->frames_ok;
     defers_once = rx_stats.sample_defers;
 
     rx_test_set_copy_hook(UART_RX_COPY_HOOK_SAMPLE_FAIL);
     devam = rx_service_budget(UART_RX_SERVICE_BUDGET);
 
     sonuc = (uint8_t)((rx_get_consumed() == c_once) &&
-                      (rx_get_parser()->frames_ok == ok_once) &&
+                      (test_rx_parser()->frames_ok == ok_once) &&
                       (devam == 0U) &&      /* spin cagrisi yapilmaz */
                       (rx_stats.sample_defers > defers_once));
 
@@ -1228,7 +1228,7 @@ static uint8_t r3_kopya_sonrasi_ornek_dustu(UART_HandleTypeDef *huart)
     HAL_Delay(3U);
     (void)rx_service_budget(UART_RX_SERVICE_BUDGET);
 
-    if ((rx_get_parser()->frames_ok != (uint16_t)(ok_once + 1U)) ||
+    if ((test_rx_parser()->frames_ok != (uint16_t)(ok_once + 1U)) ||
         (read_app_state().last_seq != 803U))
     {
         sonuc = 0U;
@@ -1265,7 +1265,7 @@ static uint8_t r3_tasma_sonrasi_senkron(UART_HandleTypeDef *huart)
     HAL_Delay(2U);
     (void)rx_service_budget(UART_RX_SERVICE_BUDGET);
 
-    if (rx_get_parser()->len == 0U)
+    if (test_rx_parser()->len == 0U)
     {
         return 0U;                   /* onkosul: bekleyen aday olmali */
     }
@@ -1280,13 +1280,13 @@ static uint8_t r3_tasma_sonrasi_senkron(UART_HandleTypeDef *huart)
     (void)rx_service_budget(UART_RX_SERVICE_BUDGET);
 
     if ((rx_stats.overruns != (uint16_t)(ovr_once + 1U)) ||
-        (rx_get_parser()->len != 0U))
+        (test_rx_parser()->len != 0U))
     {
         return 0U;                   /* aday birakilmis olmali */
     }
 
     /* Yeni gecerli cerceve: TAM BIR KEZ cozulmeli */
-    ok_once = rx_get_parser()->frames_ok;
+    ok_once = test_rx_parser()->frames_ok;
     n = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve), 2, -2, 805U);
     if ((n == 0U) ||
         (HAL_UART_Transmit(huart, cerceve, n, 100U) != HAL_OK))
@@ -1297,7 +1297,7 @@ static uint8_t r3_tasma_sonrasi_senkron(UART_HandleTypeDef *huart)
     (void)rx_service_budget(UART_RX_SERVICE_BUDGET);
     (void)rx_service_budget(UART_RX_SERVICE_BUDGET);   /* ikinci tur */
 
-    return (uint8_t)((rx_get_parser()->frames_ok ==
+    return (uint8_t)((test_rx_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
                      (read_app_state().last_seq == 805U) &&
                      (read_app_state().joy_x == 2));
@@ -1348,7 +1348,7 @@ static uint8_t r4_fe_sonrasi_toparlanma(UART_HandleTypeDef *huart)
     }
 
     /* ASIL IDDIA: toparlanmadan sonra alim calisiyor */
-    ok_once = rx_get_parser()->frames_ok;
+    ok_once = test_rx_parser()->frames_ok;
     n = frame_build_joystick(cerceve, (uint8_t)sizeof(cerceve), 11, -11, 901U);
     if ((n == 0U) ||
         (HAL_UART_Transmit(huart, cerceve, n, 100U) != HAL_OK))
@@ -1361,7 +1361,7 @@ static uint8_t r4_fe_sonrasi_toparlanma(UART_HandleTypeDef *huart)
     rx_service();
     test_tx_service();
 
-    return (uint8_t)((rx_get_parser()->frames_ok >
+    return (uint8_t)((test_rx_parser()->frames_ok >
                       ok_once) &&
                      (read_app_state().last_seq == 901U));
 }
@@ -1666,7 +1666,7 @@ static uint8_t r4_running_disi_tuketim_yok(UART_HandleTypeDef *huart)
     }
 
     c_once  = rx_get_consumed();
-    ok_once = rx_get_parser()->frames_ok;
+    ok_once = test_rx_parser()->frames_ok;
     to_once = rx_stats.frame_timeouts;
 
     /* FAULT'ta butce cagrisi hicbir sey tuketmemeli */
@@ -1684,7 +1684,7 @@ static uint8_t r4_running_disi_tuketim_yok(UART_HandleTypeDef *huart)
     }
 
     sonuc = (uint8_t)((rx_get_consumed() == c_once) &&
-                      (rx_get_parser()->frames_ok == ok_once) &&
+                      (test_rx_parser()->frames_ok == ok_once) &&
                       (rx_stats.frame_timeouts == to_once));
 
     if (r1_alimi_kur(huart) == 0U)
@@ -1723,7 +1723,7 @@ static uint8_t r5_sessizlikte_zaman_asimi(UART_HandleTypeDef *huart)
     rx_service();
     test_tx_service();
 
-    if (rx_get_parser()->len != FRAME_HEADER_SIZE)
+    if (test_rx_parser()->len != FRAME_HEADER_SIZE)
     {
         return 0U;                   /* onkosul: aday tikanmis olmali */
     }
@@ -1744,7 +1744,7 @@ static uint8_t r5_sessizlikte_zaman_asimi(UART_HandleTypeDef *huart)
 
     return (uint8_t)((rx_stats.frame_timeouts ==
                       (uint16_t)(to_once + 1U)) &&
-                     (rx_get_parser()->len == 0U));
+                     (test_rx_parser()->len == 0U));
 }
 
 
@@ -1781,7 +1781,7 @@ static uint8_t r5_devam_eden_cerceve_dusmez(UART_HandleTypeDef *huart)
 
     (void)rx_service_budget(UART_RX_SERVICE_BUDGET);
     to_once = rx_stats.frame_timeouts;
-    ok_once = rx_get_parser()->frames_ok;
+    ok_once = test_rx_parser()->frames_ok;
 
     /* Once baslik: aday olusur ve pencere baslar */
     if (HAL_UART_Transmit(huart, cerceve, FRAME_HEADER_SIZE, 100U) != HAL_OK)
@@ -1809,14 +1809,14 @@ static uint8_t r5_devam_eden_cerceve_dusmez(UART_HandleTypeDef *huart)
 
     t0 = HAL_GetTick();
     while (((HAL_GetTick() - t0) < 60U) &&
-           (rx_get_parser()->frames_ok == ok_once))
+           (test_rx_parser()->frames_ok == ok_once))
     {
         test_tx_service();
         rx_service();
         test_tx_service();
     }
 
-    return (uint8_t)((rx_get_parser()->frames_ok ==
+    return (uint8_t)((test_rx_parser()->frames_ok ==
                       (uint16_t)(ok_once + 1U)) &&
                      (rx_stats.frame_timeouts == to_once) &&
                      (read_app_state().last_seq == 970U));
@@ -1843,7 +1843,7 @@ static uint8_t r5_aday_yokken_son_tarih_yok(UART_HandleTypeDef *huart)
         test_tx_service();
     }
 
-    if (rx_get_parser()->len != 0U)
+    if (test_rx_parser()->len != 0U)
     {
         return 0U;                   /* onkosul: aday kalmamali */
     }
@@ -1891,7 +1891,7 @@ static uint8_t r5_zaman_asimi_yeniden_kurulur(UART_HandleTypeDef *huart)
     rx_service();
     test_tx_service();
 
-    if (rx_get_parser()->len == 0U)
+    if (test_rx_parser()->len == 0U)
     {
         return 0U;
     }
@@ -1912,7 +1912,7 @@ static uint8_t r5_zaman_asimi_yeniden_kurulur(UART_HandleTypeDef *huart)
 
     bekleme = rx_next_wait_ms(HAL_GetTick());
 
-    if (rx_get_parser()->len != 0U)
+    if (test_rx_parser()->len != 0U)
     {
         /* Hala aday var: YENI pencere kurulmus olmali, 0 DEGIL. */
         return (uint8_t)((bekleme != 0U) && (bekleme != UINT32_MAX) &&
@@ -1972,10 +1972,10 @@ static uint8_t r5_payload_omru(UART_HandleTypeDef *huart)
 
     /* Handler YALNIZCA start oncesi degistirilebilir */
     r1_alimi_durdur(huart);
-    rx_set_handler(r5_test_handler, NULL);
+    test_rx_set_handler(r5_test_handler, NULL);
     if (r1_alimi_kur(huart) == 0U)
     {
-        rx_set_handler(app_protocol_on_frame, NULL);
+        test_rx_set_handler(app_protocol_on_frame, NULL);
         return 0U;
     }
 
@@ -1985,7 +1985,7 @@ static uint8_t r5_payload_omru(UART_HandleTypeDef *huart)
         (HAL_UART_Transmit(huart, cerceve, n, 100U) != HAL_OK))
     {
         r1_alimi_durdur(huart);
-        rx_set_handler(app_protocol_on_frame, NULL);
+        test_rx_set_handler(app_protocol_on_frame, NULL);
         (void)r1_alimi_kur(huart);
         return 0U;
     }
@@ -2024,7 +2024,7 @@ static uint8_t r5_payload_omru(UART_HandleTypeDef *huart)
 
     /* Uygulama handler'ini geri koy */
     r1_alimi_durdur(huart);
-    rx_set_handler(app_protocol_on_frame, NULL);
+    test_rx_set_handler(app_protocol_on_frame, NULL);
     if (r1_alimi_kur(huart) == 0U)
     {
         sonuc = 0U;
@@ -2123,7 +2123,7 @@ static uint8_t tx_formats(UART_HandleTypeDef *huart, uint8_t format)
         (void)frame_build_joystick(frame, sizeof(frame), 14, -14, 12U);
         ok = tx_send(frame, 7U);
         r1_service_dondur(1U);
-        ok &= (uint8_t)(rx_get_parser()->len == 7U &&
+        ok &= (uint8_t)(test_rx_parser()->len == 7U &&
                        read_app_state().frames_handled == 0U);
         ok &= tx_send(frame + 7, 6U);
     } else {

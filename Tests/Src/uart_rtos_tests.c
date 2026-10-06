@@ -3,6 +3,7 @@
 #include "uart_comm_internal.h"
 #include "uart_comm_tests.h"
 #include "app_protocol.h"
+#include "protocol_uart.h"
 
 #ifdef UART_COMM_TEST
 static app_proto_state_t read_app_state(void)
@@ -68,7 +69,14 @@ static void on_result(const uart_comm_tx_result_t *result, void *user)
     else failures++;
     __DMB(); results++;
 }
-const uart_comm_handlers_t uart_rtos_test_handlers = {on_frame, on_result, NULL};
+static protocol_uart_t rtos_protocol;
+const uart_comm_handlers_t uart_rtos_test_handlers = {
+    .on_rx = protocol_uart_on_rx, .on_tx_result = on_result, .rx_user = &rtos_protocol
+};
+void uart_rtos_test_init_handlers(void)
+{
+    protocol_uart_init(&rtos_protocol, on_frame, NULL);
+}
 
 static uart_comm_snapshot_t snapshot(void)
 {
@@ -216,7 +224,7 @@ static void run(void *argument)
     len = frame_build_joystick(data, sizeof(data), 1, 2, 1000U);
     (void)len; ok = uart_comm_send_copy(data, 5U, 1000U) == UART_COMM_ACCEPTED;
     ok &= wait_results(base + 1U, 100U); vTaskDelay(pdMS_TO_TICKS(60U)); after = snapshot();
-    check(7, ok && after.rx_frame_timeouts == before.rx_frame_timeouts + 1U);
+    check(7, ok && after.rx_timeouts == before.rx_timeouts + 1U);
 
     base = results; start_frames = frames; reply_enabled = 1U; payload[0] = 1U;
     len = frame_build(data, sizeof(data), FRAME_TYPE_JOYSTICK_MODE, 1100U, payload, 1U);
@@ -394,7 +402,14 @@ static void serial_result(const uart_comm_tx_result_t *result, void *user)
     if (result->code == UART_COMM_TX_COMPLETE) serial_ctx.completed++;
     else serial_ctx.failed++;
 }
-const uart_comm_handlers_t uart_serial_test_handlers = {serial_frame, serial_result, NULL};
+static protocol_uart_t serial_protocol;
+const uart_comm_handlers_t uart_serial_test_handlers = {
+    .on_rx = protocol_uart_on_rx, .on_tx_result = serial_result, .rx_user = &serial_protocol
+};
+void uart_serial_test_init_handlers(void)
+{
+    protocol_uart_init(&serial_protocol, serial_frame, NULL);
+}
 
 static void serial_stats(const comm_test_profile_t *measured)
 {
@@ -412,7 +427,7 @@ static void serial_stats(const comm_test_profile_t *measured)
     values[6] = serial_ctx.stream_dropped; values[9] = serial_ctx.sink_frames;
     values[10] = serial_ctx.sink_bad;
     serial_unlock(saved);
-    values[7] = s.rx_overruns; values[8] = s.rx_frame_timeouts;
+    values[7] = s.rx_overruns; values[8] = s.rx_timeouts;
     values[11] = s.tx_queue_full; values[12] = s.rx_restarts;
     payload[0] = 0U;
     for (unsigned i = 0U; i < 13U; i++) serial_put32(payload + 1U + 4U * i, values[i]);

@@ -1,6 +1,6 @@
 # Taşınabilir UART ve protokol ayrımı
 
-Tarih: 6 Ekim 2026. Durum: uygulama öncesi tasarım incelemesi.
+Tarih: 6 Ekim 2026. Durum: kullanıcı tarafından `devam et` yanıtıyla onaylandı; uygulama planı inceleme aşamasında.
 Başlangıç: GitHub `main`, `15df55a97748ced5ae6ebfcedbce26a86f5ff9a5`.
 
 ## Amaç ve kapsam

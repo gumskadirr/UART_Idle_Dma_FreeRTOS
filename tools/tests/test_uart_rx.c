@@ -4,6 +4,7 @@
 #include <string.h>
 #include "uart_comm_internal.h"
 #include "app_protocol.h"
+#include "protocol_uart.h"
 
 #ifdef UART_COMM_TEST
 static app_proto_state_t read_app_state(void)
@@ -15,6 +16,17 @@ static app_proto_state_t read_app_state(void)
 #endif
 
 
+static protocol_uart_t rx_protocol;
+static uint8_t protocol_ready;
+static const frame_parser_t *test_rx_parser(void) { return &rx_protocol.parser; }
+static void test_rx_set_handler(frame_handler_t handler, void *user)
+{
+    if (!protocol_ready) {
+        protocol_uart_init(&rx_protocol, handler, user);
+        protocol_ready = 1U;
+    } else { rx_protocol.on_frame = handler; rx_protocol.user = user; }
+    rx_set_handler(protocol_uart_on_rx, &rx_protocol);
+}
 uint32_t model_primask;
 static uint32_t tick;
 static USART_TypeDef regs;
@@ -119,7 +131,7 @@ static void input(const uint8_t *bytes, unsigned n, int idle, int tc_irq)
 static int start(void)
 {
     app_protocol_init();
-    rx_set_handler(app_protocol_on_frame, NULL);
+    test_rx_set_handler(app_protocol_on_frame, NULL);
     CHECK(rx_start(&uart) == HAL_OK);
     return 0;
 }
@@ -150,7 +162,7 @@ static int active_start(void)
     n = frame_build_joystick(f, sizeof(f), 1, 2, 7);
     input(f, 7, 1, 1); rx_service();
     CHECK(rx_start(&uart) == HAL_BUSY);
-    CHECK(rx_get_parser()->len == 7 && rx_get_consumed() == 7);
+    CHECK(test_rx_parser()->len == 7 && rx_get_consumed() == 7);
     input(f + 7, n - 7, 1, 1); rx_service();
     CHECK(read_app_state().frames_handled == 1 && read_app_state().last_seq == 7);
     return 0;
@@ -229,7 +241,7 @@ static int partial_timeout(void)
     input(header, sizeof(header), 1, 1); rx_service();
     tick = 49; rx_service(); CHECK(rx_stats.frame_timeouts == 0);
     tick = 50; rx_service(); CHECK(rx_stats.frame_timeouts == 1);
-    CHECK(rx_get_parser()->len == 0 && rx_next_wait_ms(tick) == UINT32_MAX);
+    CHECK(test_rx_parser()->len == 0 && rx_next_wait_ms(tick) == UINT32_MAX);
     return 0;
 }
 
@@ -438,10 +450,10 @@ static int timeout_rearm(void)
     CHECK(start() == 0);
     input(headers, sizeof(headers), 1, 1); rx_service();
     tick = 50; rx_service();
-    CHECK(rx_stats.frame_timeouts == 1 && rx_get_parser()->len == 7);
+    CHECK(rx_stats.frame_timeouts == 1 && test_rx_parser()->len == 7);
     CHECK(rx_next_wait_ms(tick) == 50);
     tick = 100; rx_service();
-    CHECK(rx_stats.frame_timeouts == 2 && rx_get_parser()->len == 0);
+    CHECK(rx_stats.frame_timeouts == 2 && test_rx_parser()->len == 0);
     return 0;
 }
 
@@ -473,7 +485,7 @@ static int valid_frame_closes_recovery(void)
 static int cold_start_recovers(void)
 {
     uint8_t f[13];
-    app_protocol_init(); rx_set_handler(app_protocol_on_frame, NULL);
+    app_protocol_init(); test_rx_set_handler(app_protocol_on_frame, NULL);
     rx_force_start_fail(1);
     CHECK(rx_start(&uart) == HAL_ERROR);
     CHECK(rx_stats.start_fails == 1);
@@ -497,6 +509,88 @@ static int app_snapshot(void)
     CHECK(app_protocol_get_snapshot(&out) && model_primask == 0U);
     return 0;
 }
+
+static uint8_t raw_received[64];
+static uint16_t raw_count;
+static uint32_t raw_rx(uart_comm_rx_event_t event, const uint8_t *data, uint16_t len, void *user)
+{
+    (void)user;
+    if (event == UART_COMM_RX_DATA) {
+        memcpy(raw_received + raw_count, data, len);
+        raw_count += len;
+    }
+    return 0U;
+}
+static int raw_bytes(void)
+{
+    const uint8_t data[] = {0, 0xAA, 0x55, 0xFF, 7};
+    rx_set_handler(raw_rx, NULL);
+    CHECK(rx_start(&uart) == HAL_OK);
+    input(data, sizeof(data), 1, 1); rx_service();
+    CHECK(raw_count == sizeof(data) && !memcmp(data, raw_received, sizeof(data)));
+    CHECK(rx_next_wait_ms(tick) == UINT32_MAX);
+    return 0;
+}
+static int reset_discards_partial(void)
+{
+    protocol_uart_t adapter;
+    uint8_t f[13];
+    app_protocol_init();
+    protocol_uart_init(&adapter, app_protocol_on_frame, NULL);
+    rx_set_handler(protocol_uart_on_rx, &adapter);
+    CHECK(rx_start(&uart) == HAL_OK);
+    frame_build_joystick(f, sizeof(f), 1, 2, 9);
+    input(f, 7, 1, 1); rx_service();
+    CHECK(adapter.parser.len == 7);
+    adapter.parser.frames_ok = 5;
+    rx_test_inject_error(); rx_service(); drive(10);
+    CHECK(adapter.parser.len == 0 && adapter.parser.frames_ok == 5);
+    input(f + 7, 6, 1, 1); rx_service();
+    CHECK(read_app_state().frames_handled == 0);
+    input(f, sizeof(f), 1, 1); rx_service();
+    CHECK(read_app_state().frames_handled == 1 && adapter.parser.frames_ok == 6);
+    return 0;
+}
+static int timeout_progress_and_wrap(void)
+{
+    protocol_uart_t adapter;
+    uint8_t f[13];
+    protocol_uart_init(&adapter, NULL, NULL);
+    rx_set_handler(protocol_uart_on_rx, &adapter);
+    tick = UINT32_MAX - 20U;
+    CHECK(rx_start(&uart) == HAL_OK);
+    frame_build_joystick(f, sizeof(f), 1, 2, 9);
+    input(f, 7, 1, 1); rx_service();
+    tick += 40U;
+    input(f + 7, 1, 1, 1); rx_service();
+    CHECK(rx_next_wait_ms(tick) == 50U);
+    tick += 49U; rx_service();
+    CHECK(adapter.parser.timeouts == 0 && rx_next_wait_ms(tick) == 1U);
+    tick++; rx_service();
+    CHECK(adapter.parser.timeouts == 1 && adapter.parser.len == 0);
+    CHECK(rx_next_wait_ms(tick) == UINT32_MAX);
+    return 0;
+}
+static void error_in_frame(const frame_info_t *info, void *user)
+{
+    (void)info; (void)user;
+    rx_on_error(&uart, HAL_UART_ERROR_DMA);
+}
+static int validated_with_new_error(void)
+{
+    protocol_uart_t adapter;
+    uint8_t f[13];
+    protocol_uart_init(&adapter, error_in_frame, NULL);
+    rx_set_handler(protocol_uart_on_rx, &adapter);
+    CHECK(rx_start(&uart) == HAL_OK);
+    rx_test_inject_error(); rx_service(); drive(10);
+    CHECK(rx_test_recovery_active());
+    input(f, frame_build_joystick(f, sizeof(f), 1, 2, 9), 1, 1); rx_service();
+    CHECK(adapter.parser.frames_ok == 1 && rx_test_recovery_active());
+    rx_service();
+    CHECK(rx_get_phase() != UART_RX_PHASE_RUNNING);
+    return 0;
+}
 int main(int argc, char **argv)
 {
     static const struct { const char *name; int (*run)(void); } tests[] = {
@@ -514,7 +608,10 @@ int main(int argc, char **argv)
         {"restart_progress", restart_progress}, {"error_each_restart", error_each_restart},
         {"timeout_rearm", timeout_rearm}, {"early_fault_late_service", early_fault_late_service},
         {"valid_frame_closes_recovery", valid_frame_closes_recovery},
-        {"cold_start_recovers", cold_start_recovers}, {"app_snapshot", app_snapshot}
+        {"cold_start_recovers", cold_start_recovers}, {"app_snapshot", app_snapshot},
+        {"raw_bytes", raw_bytes}, {"reset_discards_partial", reset_discards_partial},
+        {"timeout_progress_and_wrap", timeout_progress_and_wrap},
+        {"validated_with_new_error", validated_with_new_error}
     };
     unsigned i;
     if (argc != 2) return 2;

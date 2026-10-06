@@ -3,7 +3,17 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "stm32f4xx_hal.h"
-#include "protocol.h"
+
+typedef enum {
+    UART_COMM_RX_DATA, UART_COMM_RX_TIMEOUT, UART_COMM_RX_RESET
+} uart_comm_rx_event_t;
+#define UART_COMM_RX_PENDING 1U
+#define UART_COMM_RX_VALIDATED 2U
+/* Task baglami, kritik bolum disinda. DATA isaretcisi yalniz callback'te
+ * gecerlidir; TIMEOUT/RESET NULL,0 tasir. RESET pending'i temizler.
+ * Donus: eksik mesaj bekliyor / bu cagri dogrulanmis mesaj uretti bitleri. */
+typedef uint32_t (*uart_comm_rx_handler_t)(uart_comm_rx_event_t event,
+                                          const uint8_t *data, uint16_t len, void *user);
 
 typedef enum {
     UART_RX_PHASE_STOPPED = 0,
@@ -27,8 +37,9 @@ typedef struct {
     bool recovery_fault;
 } uart_comm_tx_result_t;
 typedef struct {
-    frame_handler_t on_frame;
+    uart_comm_rx_handler_t on_rx;
     void (*on_tx_result)(const uart_comm_tx_result_t *, void *);
+    void *rx_user;
     void *user;
 } uart_comm_handlers_t;
 typedef struct {
@@ -37,7 +48,7 @@ typedef struct {
     bool initialized, rx_ready, rx_quiescent, tx_accepting, has_tx_failure;
     uart_comm_tx_code_t last_tx_failure;
     uint32_t tx_queue_depth, tx_queue_high_water;
-    uint32_t rx_bytes_consumed, rx_overruns, rx_discarded_bytes, rx_frame_timeouts;
+    uint32_t rx_bytes_consumed, rx_overruns, rx_discarded_bytes, rx_timeouts;
     uint32_t rx_start_fails, rx_restarts, rx_recovery_fails, rx_snapshot_defers, rx_late_events;
     uint32_t tx_accepted, tx_completed, tx_failed, tx_cancelled, tx_queue_full;
     uint32_t tx_start_busy, tx_start_errors, tx_dma_errors, tx_timeouts, tx_recovery_fails, tx_late_events;

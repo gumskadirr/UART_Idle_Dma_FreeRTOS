@@ -6,6 +6,7 @@
 #undef main
 #undef HAL_UARTEx_ReceiveToIdle_DMA
 #undef HAL_UART_AbortReceive_IT
+#include "protocol_uart.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
@@ -27,6 +28,7 @@ static uint32_t first_wait;
 static uint8_t *rx_ptr;
 static int reenter, notify_step;
 static frame_handler_t frame_handler;
+static protocol_uart_t comm_protocol;
 
 void model_assert(void) { abort(); }
 HAL_StatusTypeDef HAL_UARTEx_ReceiveToIdle_DMA(UART_HandleTypeDef *u, uint8_t *p, uint16_t n)
@@ -88,7 +90,9 @@ static void on_result(const uart_comm_tx_result_t *out, void *user)
   if (reenter) { reenter = 0; (void)uart_comm_send_copy(bytes, 3U, 123U); } }
 static int setup(void)
 {
-    uart_comm_handlers_t handlers = {frame_handler, on_result, NULL};
+    uart_comm_handlers_t handlers = {.on_rx = protocol_uart_on_rx, .on_tx_result = on_result,
+                                     .rx_user = &comm_protocol};
+    protocol_uart_init(&comm_protocol, frame_handler, NULL);
     dma_rx.Parent = dma_tx.Parent = &uart;
     dma_rx.Init.Direction = DMA_PERIPH_TO_MEMORY; dma_rx.Init.Mode = DMA_CIRCULAR;
     dma_tx.Init.Direction = DMA_MEMORY_TO_PERIPH; dma_tx.Init.Mode = DMA_NORMAL;
@@ -98,7 +102,7 @@ static int setup(void)
 }
 static int wrong_dma(void)
 {
-    uart_comm_handlers_t handlers = {NULL, on_result, NULL};
+    uart_comm_handlers_t handlers = {.on_tx_result = on_result};
     CHECK(uart_comm_init(&uart, &handlers) == HAL_ERROR); /* Parent eksik */
     dma_rx.Parent = dma_tx.Parent = &uart;
     CHECK(uart_comm_init(&uart, &handlers) == HAL_ERROR); /* RX circular degil */

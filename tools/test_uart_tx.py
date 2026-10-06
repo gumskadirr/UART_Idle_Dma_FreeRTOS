@@ -23,7 +23,7 @@ def main():
     executable = out / "tx_tests.exe"
     subprocess.run([str(cc), "-std=c99", "-Wall", "-Wextra", "-Werror", "-DUART_COMM_TEST",
                     "-Itools/tests/hal_model", "-ICore/Inc", "tools/tests/test_uart_tx.c",
-                    "Core/Src/uart_comm.c", "Core/Src/protocol.c", "-o", str(executable)],
+                    "Core/Src/uart_comm.c", "Core/Src/protocol.c", "Core/Src/protocol_uart.c", "-o", str(executable)],
                    cwd=ROOT, env=env, check=True)
     failed = 0
     for name in CASES:

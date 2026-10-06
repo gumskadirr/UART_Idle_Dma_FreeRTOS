@@ -28,6 +28,18 @@ static app_proto_state_t read_app_state(void)
    Test derlemesi: tools/build.sh test   (-DUART_COMM_TEST) */
 #ifdef UART_COMM_TEST
 #include "uart_comm_internal.h"
+static protocol_uart_t test_protocol;
+static uint8_t protocol_ready;
+const frame_parser_t *test_rx_parser(void) { return &test_protocol.parser; }
+void test_rx_set_handler(frame_handler_t handler, void *user)
+{
+    if (!protocol_ready) {
+        protocol_uart_init(&test_protocol, handler, user);
+        protocol_ready = 1U;
+    } else { test_protocol.on_frame = handler; test_protocol.user = user; }
+    rx_set_handler(protocol_uart_on_rx, &test_protocol);
+}
+
 
 /* Sonuc kutusu yeni denemeden once bosaltilir; testler counters/delta
    uzerinden karar verir. T4 sonuc davranisi testleri kendi sonucunu alir. */
@@ -445,7 +457,7 @@ static void tx_rx_bekle(uint16_t frames_ok_hedef, uint32_t ms)
     rx_service();
 
     if ((tx_get_state() == UART_TX_IDLE) &&
-        (rx_get_parser()->frames_ok >= frames_ok_hedef))
+        (test_rx_parser()->frames_ok >= frames_ok_hedef))
     {
       break;
     }
@@ -507,7 +519,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
      Beklenen 13 bayt: AA 55 01 10 04 01 00 E8 03 0C FE 46 59 */
   /* Mutlak degil DELTA olcum: ileride yeniden baslatma istatistikleri
      korunacagi icin "frames_ok == 1" varsayimi kirilgandir (P0). */
-  ok_once = rx_get_parser()->frames_ok;
+  ok_once = test_rx_parser()->frames_ok;
 
   n = frame_build_joystick(tx, (uint8_t)sizeof(tx), 1000, -500, 1U);
   if (n == 0U)
@@ -526,7 +538,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   HAL_Delay(1U);
   rx_service();
 
-  lb_kaydet_bool((uint8_t)((rx_get_parser()->frames_ok ==
+  lb_kaydet_bool((uint8_t)((test_rx_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
                            (read_app_state().last_seq == 1U) &&
                            (read_app_state().joy_x == 1000) &&
@@ -556,20 +568,20 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
     rx_service();
   }
 
-  lb_kaydet_bool((uint8_t)((rx_get_parser()->frames_ok ==
+  lb_kaydet_bool((uint8_t)((test_rx_parser()->frames_ok ==
                             (uint16_t)(ok_once + 40U)) &&
                            (read_app_state().last_seq == 40U) &&
                            (read_app_state().next_seq == 41U) &&
                            (read_app_state().seq_gap_events == 0U) &&
-                           (rx_get_parser()->len == 0U) &&
-                           (rx_get_parser()->bytes_dropped == 0U)));
+                           (test_rx_parser()->len == 0U) &&
+                           (test_rx_parser()->bytes_dropped == 0U)));
 
   /* ---------------- T3: otomatik zaman asimi ----------------
      S13 frame_parser_timeout() fonksiyonunu DOGRUDAN cagirir, yani
      algoritmayi sinar. Burada sinanan sey kararin kendiliginden verilmesi:
      gercek 50 ms sessizlik -> rx_service -> check_frame_timeout. */
   to_once   = rx_stats.frame_timeouts;
-  drop_once = rx_get_parser()->bytes_dropped;
+  drop_once = test_rx_parser()->bytes_dropped;
 
   if (HAL_UART_Transmit(huart, t3_baslik,
                         (uint16_t)sizeof(t3_baslik), 100U) != HAL_OK)
@@ -579,7 +591,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
 
   HAL_Delay(1U);
   rx_service();
-  bekleyen = rx_get_parser()->len;      /* 7 bayt tikanmis olmali */
+  bekleyen = test_rx_parser()->len;      /* 7 bayt tikanmis olmali */
 
   service_dondur(60U);                       /* 50 ms'de ateslenmeli */
 
@@ -589,8 +601,8 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
      55 01 20 37 01 00 hicbiri SYNC0 degil. Toplam 7. */
   lb_kaydet_bool((uint8_t)((rx_stats.frame_timeouts ==
                             (uint16_t)(to_once + 1U)) &&
-                           (rx_get_parser()->len == 0U) &&
-                           (rx_get_parser()->bytes_dropped ==
+                           (test_rx_parser()->len == 0U) &&
+                           (test_rx_parser()->bytes_dropped ==
                             (uint16_t)(drop_once + FRAME_HEADER_SIZE))));
 
   /* ---------------- T4: sinir testi (bulgu 2 regresyonu) ----------------
@@ -619,7 +631,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
     LB_IPTAL(LB_IPTAL_FRAME_BUILD);
   }
 
-  ok_once = rx_get_parser()->frames_ok;
+  ok_once = test_rx_parser()->frames_ok;
   to_once = rx_stats.frame_timeouts;
 
   if (HAL_UART_Transmit(huart, tx, FRAME_HEADER_SIZE, 100U) != HAL_OK)
@@ -642,14 +654,14 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   /* Teslim olana kadar (veya 30 ms) service dondur */
   t0 = HAL_GetTick();
   while (((HAL_GetTick() - t0) < 30U) &&
-         ((rx_get_parser()->frames_ok == ok_once) ||
+         ((test_rx_parser()->frames_ok == ok_once) ||
           (tx_get_state() != UART_TX_IDLE)))
   {
     test_tx_service();
     rx_service();
   }
 
-  lb_kaydet_bool((uint8_t)((rx_get_parser()->frames_ok ==
+  lb_kaydet_bool((uint8_t)((test_rx_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
                            (rx_stats.frame_timeouts == to_once) &&
                            (read_app_state().last_seq == 41U) &&
@@ -662,7 +674,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
      ErrorCallback cagirir; bu yuzden toparlanma BUSY_RX dalina girip
      calisan alima DOKUNMAMALIDIR. */
   err_once = rx_stats.error_events;
-  ok_once  = rx_get_parser()->frames_ok;
+  ok_once  = test_rx_parser()->frames_ok;
 
   SET_BIT(huart->Instance->CR1, USART_CR1_SBK);
   HAL_Delay(2U);
@@ -700,7 +712,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   HAL_Delay(2U);
   rx_service();
 
-  lb_kaydet_bool((uint8_t)((rx_get_parser()->frames_ok ==
+  lb_kaydet_bool((uint8_t)((test_rx_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
                            (read_app_state().last_seq == 42U) &&
                            (read_app_state().joy_x == -250) &&
@@ -714,10 +726,10 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
 
      rx_start ayristiriciyi sifirlayacagi icin onceki sayaclar
      debugger'da gorunsun diye once saklaniyor. */
-  lb_frames_ok     = rx_get_parser()->frames_ok;
+  lb_frames_ok     = test_rx_parser()->frames_ok;
   lb_last_seq      = read_app_state().last_seq;
   lb_seq_gaps      = read_app_state().seq_gap_events;
-  lb_bytes_dropped = rx_get_parser()->bytes_dropped;
+  lb_bytes_dropped = test_rx_parser()->bytes_dropped;
 
   /* Yeni butce testi: onceki FE donemi 100 ms saglikli calismayla kapanir. */
   service_dondur(UART_RX_HEALTHY_MS + 1U);
@@ -758,7 +770,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   /* Yeniden kurulan alim icin YENI delta tabani: rx_start ayristiriciyi
      sifirliyor ama ileride (R1/R2) sifirlamayacak. Mutlak "frames_ok == 1"
      yerine bu tabana gore olculur. */
-  ok_once = rx_get_parser()->frames_ok;
+  ok_once = test_rx_parser()->frames_ok;
 
   /* Alim gercekten geri geldi mi: bir cerceve daha cozulmeli (delta) */
   n = frame_build_joystick(tx, (uint8_t)sizeof(tx), 12, -34, 43U);
@@ -776,7 +788,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   rx_service();
 
   lb_kaynak[lb_sayisi] = LB_KAYNAK_ENJEKTE;
-  lb_kaydet_bool((uint8_t)((rx_get_parser()->frames_ok ==
+  lb_kaydet_bool((uint8_t)((test_rx_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
                            (read_app_state().last_seq == 43U) &&
                            (read_app_state().joy_x == 12) &&
@@ -789,7 +801,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
 
      Sayaclar DELTA olarak kontrol ediliyor: T4 de artik uart_tx kullandigi
      icin mutlak deger beklemek testi gereksiz yere kirilgan yapar. */
-  ok_once        = rx_get_parser()->frames_ok;
+  ok_once        = test_rx_parser()->frames_ok;
   tx_frames_once = tx_stats.frames_sent;
   tx_bytes_once  = tx_stats.bytes_sent;
   tx_cplt_once   = tx_stats.tx_complete_events;
@@ -817,7 +829,7 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
                            (tx_get_state() == UART_TX_IDLE)));
 
   /* RX tarafi: ayni cerceve geri geldi mi */
-  lb_kaydet_bool((uint8_t)((rx_get_parser()->frames_ok ==
+  lb_kaydet_bool((uint8_t)((test_rx_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
                            (read_app_state().last_seq == 44U) &&
                            (read_app_state().joy_x == 1000) &&
@@ -831,8 +843,8 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
      mikrosaniye mertebesinde, yani ikincisi DMA mesgulken dusuyor.
      Burada sinanan sey durum makinesinin tamponu kilitlemesi: ikinci istek
      s_buf'a DOKUNMADAN geri cevrilmeli. */
-  ok_once   = rx_get_parser()->frames_ok;
-  crc_once  = rx_get_parser()->err_crc;
+  ok_once   = test_rx_parser()->frames_ok;
+  crc_once  = test_rx_parser()->err_crc;
   busy_once = tx_stats.rejected_busy;
 
   n  = frame_build_joystick(tx,  (uint8_t)sizeof(tx),    7,   -7, 45U);
@@ -856,9 +868,9 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
      istek s_buf'in yarisini ezseydi hatta karma bir cerceve cikar ve CRC
      duserdi. 46 numarali cerceve ise hic gonderilmedi, o yuzden bir sonraki
      test onu kullaniyor ve seq_gaps sifir kaliyor. */
-  lb_kaydet_bool((uint8_t)((rx_get_parser()->frames_ok ==
+  lb_kaydet_bool((uint8_t)((test_rx_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
-                           (rx_get_parser()->err_crc == crc_once) &&
+                           (test_rx_parser()->err_crc == crc_once) &&
                            (read_app_state().last_seq == 45U) &&
                            (read_app_state().joy_x == 7) &&
                            (read_app_state().joy_y == -7)));
@@ -871,8 +883,8 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
      duser (err_crc artar) ve cerceve hic teslim edilmezdi. Yani bu test
      _copy tasarim kararinin dogrudan kaniti: zero-copy'ye gecildigi gun
      duser. */
-  ok_once  = rx_get_parser()->frames_ok;
-  crc_once = rx_get_parser()->err_crc;
+  ok_once  = test_rx_parser()->frames_ok;
+  crc_once = test_rx_parser()->err_crc;
 
   n = frame_build_joystick(tx, (uint8_t)sizeof(tx), -1234, 4321, 46U);
   if (n == 0U)
@@ -888,9 +900,9 @@ void loopback_testi_kosur(UART_HandleTypeDef *huart)
   tx_rx_bekle((uint16_t)(ok_once + 1U), 30U);
 
   lb_kaydet_bool((uint8_t)((st1 == UART_TX_OK) &&
-                           (rx_get_parser()->frames_ok ==
+                           (test_rx_parser()->frames_ok ==
                             (uint16_t)(ok_once + 1U)) &&
-                           (rx_get_parser()->err_crc == crc_once) &&
+                           (test_rx_parser()->err_crc == crc_once) &&
                            (read_app_state().last_seq == 46U) &&
                            (read_app_state().joy_x == -1234) &&
                            (read_app_state().joy_y == 4321)));

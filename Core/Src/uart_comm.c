@@ -42,14 +42,13 @@ static uint32_t cycle_elapsed(cycle_sample_t before)
  * Kesme yalniz olay kaydeder; DMA bellegi parser'a sabit kopya ile verilir. */
 
 typedef struct {
-    frame_parser_t parser;
-    frame_handler_t handler;
+    uart_comm_rx_handler_t handler;
     void *handler_user;
     volatile rx_phase_t phase;
-    uint8_t parser_ready;
+    uint8_t pending;
 
     volatile uint32_t wrap_base, session, error_generation;
-    uint32_t consumed, last_producer, frame_tick;
+    uint32_t consumed, last_producer, progress_tick;
 
     struct {
         volatile uint8_t data, error, health;
@@ -84,7 +83,7 @@ typedef struct {
 typedef struct {
     uint32_t tag, admission_epoch;
     uint16_t len;
-    uint8_t bytes[FRAME_MAX_SIZE];
+    uint8_t bytes[UART_TX_BUF_SIZE];
 } tx_item_t;
 static StaticTask_t owner_tcb;
 static StackType_t owner_stack[COMM_STACK_SIZE];
@@ -231,7 +230,7 @@ static void rx_reset_progress(void)
     unlock(saved);
     comm.rx.sample.active = 0U;
     comm.rx.last_producer = 0U;
-    comm.rx.frame_tick = HAL_GetTick();
+    comm.rx.progress_tick = HAL_GetTick();
 }
 
 UART_LOCAL uint32_t rx_producer_from(uint32_t wrap_base, uint8_t pending_tc, uint32_t ndtr)
@@ -273,7 +272,7 @@ static uint8_t rx_sample_progress(uint32_t *out)
         comm.rx.sample.active = 0U;
         if (*out != comm.rx.last_producer) {
             comm.rx.last_producer = *out;
-            comm.rx.frame_tick = now;
+            comm.rx.progress_tick = now;
         }
         return 1U;
     }
@@ -292,15 +291,19 @@ static uint8_t rx_sample_progress(uint32_t *out)
 }
 
 static void rx_close_recovery(void);
-static void rx_frame_received(const frame_info_t *info, void *unused)
+/* Uygulama/protokol callback'i yalniz dogrulanmis kopyayi okur.
+ * Donuste yeni IRQ hatasi varsa dogrulanmis mesaj toparlanmayi kapatmaz. */
+static void rx_deliver(uart_comm_rx_event_t event, const uint8_t *data, uint16_t len)
 {
-    uint32_t saved = lock();
-    (void)unused;
-    /* Yeni oturumdaki ilk gecerli cerceve saglik kanitidir. Ayni anda gelen
-     * yeni hatayi affetme; handler kritik bolum disinda kalir. */
+    uint32_t feedback = 0U, saved;
+    if (comm.rx.handler != NULL)
+        feedback = comm.rx.handler(event, data, len, comm.rx.handler_user);
+    comm.rx.pending = (uint8_t)(event != UART_COMM_RX_RESET &&
+                              (feedback & UART_COMM_RX_PENDING) != 0U);
+    if (event == UART_COMM_RX_RESET || !(feedback & UART_COMM_RX_VALIDATED)) return;
+    saved = lock();
     if (comm.rx.recovery.active && !rx_fault_pending() && rx_hardware_healthy()) rx_close_recovery();
     unlock(saved);
-    if (comm.rx.handler != NULL) comm.rx.handler(info, comm.rx.handler_user);
 }
 
 #ifdef UART_COMM_TEST
@@ -337,7 +340,7 @@ UART_LOCAL uint8_t rx_service_budget(uint16_t budget)
         if (available >= UART_RX_BUF_SIZE) {
             rx_stats.overruns++;
             rx_stats.discarded_bytes += available;
-            frame_parser_discard(&comm.rx.parser);
+            rx_deliver(UART_COMM_RX_RESET, NULL, 0U);
             comm.rx.consumed = produced;
             return 1U;
         }
@@ -366,7 +369,7 @@ UART_LOCAL uint8_t rx_service_budget(uint16_t budget)
         comm.rx.consumed += count;
         rx_stats.bytes_consumed += count;
         budget -= (uint16_t)count;
-        frame_parser_feed(&comm.rx.parser, scratch, (uint16_t)count, rx_frame_received, NULL);
+        rx_deliver(UART_COMM_RX_DATA, scratch, (uint16_t)count);
     }
     return (uint8_t)(!rx_fault_pending() && rx_sample_progress(&produced) && produced != comm.rx.consumed);
 }
@@ -376,18 +379,18 @@ UART_LOCAL uint8_t rx_service_budget(uint16_t budget)
 static void rx_service_timeout(void)
 {
     uint32_t produced, now = HAL_GetTick();
-    if (comm.rx.parser.len == 0U || comm.rx.events.data || rx_fault_pending() ||
-        (now - comm.rx.frame_tick) < UART_RX_FRAME_TIMEOUT_MS) return;
+    if (!comm.rx.pending || comm.rx.events.data || rx_fault_pending() ||
+        (now - comm.rx.progress_tick) < UART_RX_FRAME_TIMEOUT_MS) return;
     if (!rx_sample_progress(&produced)) return;
     if (produced != comm.rx.consumed) {
         comm.rx.events.data = 1U;
         return;
     }
     now = HAL_GetTick();
-    if ((now - comm.rx.frame_tick) >= UART_RX_FRAME_TIMEOUT_MS && !rx_fault_pending()) {
-        frame_parser_timeout(&comm.rx.parser, rx_frame_received, NULL);
+    if ((now - comm.rx.progress_tick) >= UART_RX_FRAME_TIMEOUT_MS && !rx_fault_pending()) {
+        rx_deliver(UART_COMM_RX_TIMEOUT, NULL, 0U);
         rx_stats.frame_timeouts++;
-        comm.rx.frame_tick = now;
+        comm.rx.progress_tick = now;
     }
 }
 
@@ -464,7 +467,7 @@ static void rx_try_restart(uint32_t now)
     comm.rx.recovery.retry_at = now + UART_RX_RESTART_RETRY_MS;
     __HAL_UART_CLEAR_OREFLAG(comm.uart);
     comm.uart->ErrorCode = HAL_UART_ERROR_NONE;
-    frame_parser_discard(&comm.rx.parser);
+    rx_deliver(UART_COMM_RX_RESET, NULL, 0U);
 #ifdef UART_COMM_TEST
     if (test.restart_fail) {
         rx_reset_progress();
@@ -526,10 +529,7 @@ UART_LOCAL HAL_StatusTypeDef rx_start(UART_HandleTypeDef *uart)
     comm.uart = uart;
     rx_close_recovery();
     comm.rx.recovery.requested = 0U;
-    if (!comm.rx.parser_ready) {
-        frame_parser_init(&comm.rx.parser);
-        comm.rx.parser_ready = 1U;
-    } else frame_parser_discard(&comm.rx.parser);
+    rx_deliver(UART_COMM_RX_RESET, NULL, 0U);
     if (rx_start_hardware()) return HAL_OK;
     rx_stats.start_fails++;
     rx_set_phase(UART_RX_PHASE_FAULT);
@@ -578,7 +578,7 @@ UART_LOCAL uint32_t rx_next_wait_ms(uint32_t now)
     case UART_RX_PHASE_RUNNING:
         if (comm.rx.sample.active) return remaining(now, comm.rx.sample.retry_at);
         if (comm.rx.events.data) return 0U;
-        return comm.rx.parser.len ? remaining(now, comm.rx.frame_tick + UART_RX_FRAME_TIMEOUT_MS) : UINT32_MAX;
+        return comm.rx.pending ? remaining(now, comm.rx.progress_tick + UART_RX_FRAME_TIMEOUT_MS) : UINT32_MAX;
     case UART_RX_PHASE_ABORTING:
         return remaining(now, comm.rx.recovery.abort_at + UART_RX_ABORT_TIMEOUT_MS);
     case UART_RX_PHASE_RETRY_WAIT: {
@@ -590,7 +590,7 @@ UART_LOCAL uint32_t rx_next_wait_ms(uint32_t now)
     }
 }
 
-UART_LOCAL void rx_set_handler(frame_handler_t handler, void *user)
+UART_LOCAL void rx_set_handler(uart_comm_rx_handler_t handler, void *user)
 {
     if (comm.rx.phase == UART_RX_PHASE_STOPPED || comm.rx.phase == UART_RX_PHASE_FAULT) {
         comm.rx.handler = handler;
@@ -609,7 +609,6 @@ UART_LOCAL rx_phase_t rx_get_phase(void) { return comm.rx.phase; }
 UART_LOCAL uint8_t rx_is_quiescent(void) { return rx_hardware_stopped(); }
 UART_LOCAL uint8_t rx_get_produced(uint32_t *out) { return rx_sample_producer(out); }
 UART_LOCAL uint32_t rx_get_consumed(void) { return comm.rx.consumed; }
-UART_LOCAL const frame_parser_t *rx_get_parser(void) { return &comm.rx.parser; }
 
 /* RX IRQ olay kaydi; servis kararini owner verir. */
 
@@ -984,7 +983,7 @@ static void comm_publish_snapshot(void)
     out.rx_bytes_consumed = rx_stats.bytes_consumed;
     out.rx_overruns = rx_stats.overruns;
     out.rx_discarded_bytes = rx_stats.discarded_bytes;
-    out.rx_frame_timeouts = rx_stats.frame_timeouts;
+    out.rx_timeouts = rx_stats.frame_timeouts;
     out.rx_start_fails = rx_stats.start_fails;
     out.rx_restarts = rx_stats.restarts;
     out.rx_recovery_fails = rx_stats.recovery_fails;
@@ -1005,24 +1004,10 @@ static void comm_publish_snapshot(void)
     unlock(saved);
 }
 
-static void comm_deliver_frame(const frame_info_t *info, void *user)
-{
-    (void)user;
-    if (comm.handlers.on_frame != NULL) {
-#ifdef COMM_PROFILE
-        cycle_sample_t before = cycle_sample();
-#endif
-        comm.handlers.on_frame(info, comm.handlers.user);
-#ifdef COMM_PROFILE
-        uint32_t elapsed = cycle_elapsed(before);
-        if (elapsed > profile.max_frame_handler_cycles) profile.max_frame_handler_cycles = elapsed;
-#endif
-    }
-}
 /* ==================== Owner service / task ==================== */
 static void comm_start_owner(void)
 {
-    rx_set_handler(comm_deliver_frame, NULL);
+    rx_set_handler(comm.handlers.on_rx, comm.handlers.rx_user);
     (void)rx_start(comm.uart); /* HAL_ERROR owner'in sinirli recovery akisina gider. */
     comm_publish_snapshot();
 }
@@ -1201,7 +1186,7 @@ uart_comm_send_status_t uart_comm_send_copy(const uint8_t *data, uint16_t len, u
     tx_item_t item;
     uint32_t saved, epoch;
     bool accepting;
-    if (__get_IPSR() || data == NULL || len == 0U || len > FRAME_MAX_SIZE) return UART_COMM_INVALID;
+    if (__get_IPSR() || data == NULL || len == 0U || len > UART_TX_BUF_SIZE) return UART_COMM_INVALID;
     if (!comm.initialized || xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) return UART_COMM_NOT_READY;
     saved = lock();
     accepting = comm.accepting;
@@ -1271,6 +1256,13 @@ void comm_test_get_profile(comm_test_profile_t *out)
     profile.stack_free_words = free_words;
     *out = profile;
     unlock(saved);
+}
+static cycle_sample_t frame_before;
+void comm_test_frame_enter(void) { frame_before = cycle_sample(); }
+void comm_test_frame_exit(void)
+{
+    uint32_t elapsed = cycle_elapsed(frame_before);
+    if (elapsed > profile.max_frame_handler_cycles) profile.max_frame_handler_cycles = elapsed;
 }
 void comm_test_irq_enter(void) { irq_started = cycles(); }
 void comm_test_irq_exit(void)

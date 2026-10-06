@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "uart_comm_internal.h"
+#include "protocol.h"
 
 uint32_t model_primask;
 static uint32_t tick;

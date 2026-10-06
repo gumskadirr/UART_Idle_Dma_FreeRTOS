@@ -21,6 +21,7 @@ CASES = (
     "rebind", "sync_start_error", "producer_boundaries", "full_lap_and_300",
     "restart_progress", "error_each_restart", "timeout_rearm", "early_fault_late_service",
     "valid_frame_closes_recovery", "cold_start_recovers", "app_snapshot",
+    "raw_bytes", "reset_discards_partial", "timeout_progress_and_wrap", "validated_with_new_error",
 )
 
 
@@ -40,7 +41,7 @@ def main():
     executable = output / ("rx_tests.exe" if sys.platform == "win32" else "rx_tests")
     command = [cc, "-std=c99", "-Wall", "-Wextra", "-Werror", "-DUART_COMM_TEST",
                "-Itools/tests/hal_model", "-ICore/Inc", "tools/tests/test_uart_rx.c",
-               "Core/Src/uart_comm.c", "Core/Src/protocol.c", "Core/Src/app_protocol.c", "-o", str(executable)]
+               "Core/Src/uart_comm.c", "Core/Src/protocol.c", "Core/Src/protocol_uart.c", "Core/Src/app_protocol.c", "-o", str(executable)]
     env = os.environ.copy()
     env["PATH"] = str(pathlib.Path(cc).resolve().parent) + os.pathsep + env.get("PATH", "")
     subprocess.run(command, cwd=ROOT, env=env, check=True)
