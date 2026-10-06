@@ -149,3 +149,20 @@ Firmware SHA256:
 - **Güncel kart firmware'i** üretim `readability-production.elf`: `bdd5f6d7f25e0b8b6d2f4b3adbbf326ed3b194b70ec6ba9500619de502c41f65`; initialized1, rx_ready1, tx_accepting1, TX_IDLE, tasks4. Üretim text46240/data96/bss25088; önceki düzenlemeye göre text+48bayt, RAM aynı.
 
 Son kartta üretim firmware'i var. `.ioc`/generated donanım ayarları korunur. Commit/push yapılmadı.
+
+
+## Taşınabilir katmanlı paket — 6 Ekim 2026
+
+Kullanıcının `planı uygula` onayıyla UART `Lib/Uart` paketine taşındı. Byte DATA/TIMEOUT/RESET arayüzü, isteğe bağlı `protocol_uart`, STM32F4 portu, ayarlanabilir statik kaynaklar ve projeye ait HAL forwarding callback'leri uygulandı. Tek owner/task ve mevcut USART2/PA2–PA3/DMA/NVIC/FreeRTOS ayarları korundu. [Paket kullanımı](Lib/Uart/README.md), [yazılı tasarım](docs/superpowers/specs/2026-10-06-uart-katmanli-mimari-design.md), [uygulama ve kanıt planı](docs/superpowers/plans/2026-10-06-uart-katmanli-mimari.md).
+
+RX35/35, TX23/23, RTOS17/17, port3/3; protokolsüz USART1/DMA2 ARM link/ayar2/2 ve10 hatalı config reddi. CubeIDE Debug/Release ve native/CH340/üretim tam derlemeleri0 hata/0 uyarı. Native protocol birim29/29; CH34013/13. Native loopback ve diğer full-native kabul önceki tarihsel koşulardır, bu çalışmada tekrar çalıştırılmadı.
+
+CH340 idle10sn/0 UART turu;100Hz1000TX/1000RX,10087ms, servis+ISR%1,521; continuous64byte1000TX/1000RX,5697ms,%7,908. Stack boş379/512word; max kritik1228cycle, IRQ1852cycle, RX latency7659cycle, frame handler2850cycle, result handler153cycle, service45287cycle. Tam task CPU hedefi ve önceki global enqueue trace kabulü açık kalır. Timeout ilk gözlenen üretici ilerlemesine göre hesaplanır; ilk örnekleme öncesi task gecikmesi için donanım timestamp'i eklenmedi.
+
+Bağımsız `layered_uart_review`: yeni Critical/Important yok; iki header yorumundaki varsayılan64byte metni minor olarak ertelendi (gerçek limit `UART_TX_BUF_SIZE`). Reviewer's binary rerun Windows DLL relocation623 ile başlayamadı; ana ajan modelleri ve kartı başarıyla çalıştırdı.
+
+Kanıtlar `.build/layered-final-*.log`, `layered-{native,serial,production}-build.log`, `layered-production-symbols.log`, `.build/portable/*`; kart `.build/board-tests/layered-ch340-{results,metrics,order}.json` ve `layered-{native,serial,production}-smoke.log`.
+
+Native ELF SHA256 `12317b9824804f802f37f7c056ed6add5181cf6d8f9a97c6b54a8ecbbe2bf99c`; CH340 `591a0b587df198780babb78961da61c1f7c62d926ade0c2e744c58dfa1f1a463`.
+
+**Güncel kart firmware'i** üretim `.build/board-tests/layered-production.elf`, SHA256 `efc310c178a976222dc476013412bd533c1a84eb8c276778e07da364277d0acb`; initialized1/rx_ready1/tx_accepting1/TX_IDLE/tasks4. text47236/data96/bss25104; eski readability üretimine göre text+996bayt/bss+16bayt. Bu son kayıt önceki `readability-production.elf` kart durumu kaydını günceller. Katmanlı commit'ler yereldedir; başlangıç projesi `15df55a` ile pushlanmıştır.

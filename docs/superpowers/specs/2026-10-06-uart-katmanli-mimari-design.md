@@ -1,6 +1,6 @@
 # Taşınabilir UART ve protokol ayrımı
 
-Tarih: 6 Ekim 2026. Durum: kullanıcı tarafından `devam et` yanıtıyla onaylandı; uygulama planı inceleme aşamasında.
+Tarih: 6 Ekim 2026. Durum: onaylandı ve uygulandı; son kabul/kararlar uygulama planında kayıtlıdır.
 Başlangıç: GitHub `main`, `15df55a97748ced5ae6ebfcedbce26a86f5ff9a5`.
 
 ## Amaç ve kapsam
@@ -41,7 +41,7 @@ Callback dönüşü iki bağımsız bilgi taşır: bekleyen eksik mesaj var mı;
 
 - Parser ve frame handler'ının sahibi `protocol_uart` context'idir. Adaptör context'i ve kullanıcı hedefi UART modülü ömrü boyunca yaşar; başlangıç scheduler öncesidir.
 - RESET, taşma veya yeni RX oturumu öncesinde eksik adayı atar; protokol istatistiklerini korur. İlk kurulumda parser ayrıca initialize edilir. Reset dönüşü bekleyen aday bırakmaz.
-- Eksik aday varsa, varsayılan 50 ms timeout son **DMA üretici ilerlemesine** göre hesaplanır. Scratch tesliminin veya taskın geç çalışmasının zamanı deadline'ı uzatmaz.
+- Eksik aday varsa, varsayılan 50 ms timeout son **gözlenen DMA üretici ilerlemesine** göre hesaplanır. Gözlemden sonra scratch teslimi veya uzun handler zamanı deadline'ı uzatmaz. İlk ilerlemenin task tarafından gözlenmesine kadarki gecikme için donanım timestamp'i yoktur; baseline davranışı korunur.
 - TIMEOUT öncesinde üretici tekrar örneklenir. Yeni byte veya ertelenmiş örnekleme varsa timeout işlenmez. Timeout ikinci RX bütçesi açmaz.
 - TIMEOUT sonrası hâlâ aday varsa bir sonraki timeout yeni zamanla kurulur; aday yoksa periyodik uyanma bırakılmaz. `uint32_t` tick sarımı korunur.
 - Doğrulanmış mesaj, aktif RX toparlanmasını yalnız donanım sağlıklıyken ve bekleyen hata yokken kapatabilir. Mevcut 100 ms sağlıklı çalışma ile kapatma yolu da korunur.
@@ -56,7 +56,7 @@ Port; donanımın çalışıyor/sağlıklı/durmuş olması, TC/NDTR örnekleme,
 
 Genel HAL callback tanımları projeye ait USER CODE alanlarında bulunur ve kütüphanenin `uart_comm_on_*` kapılarına handle ile yönlendirilir. Kütüphane başka UART handle'larını işlemez. Error callback RX ve TX hata kayıtlarını birlikte yaptıktan sonra taskı uyandırır. UART IRQ çıkış kapısı HAL handler'dan sonra çağrılır; STARTING sırasında sahte hata üretmez.
 
-`uart_comm_config.h` varsayılanları: RX halka 256, scratch 32, RX tur bütçesi 64; TX öğesi 64, kuyruk 8; task stack 512 word, native priority 25. Mevcut sample/abort/TX timeout ve sınırlı RX restart politikaları aynı kalır. Desteklenen ayar aralıkları derleme zamanında kontrol edilir; kuyruk/dizi boyutları birbirinden bağımsız sabitlerle ayrışmaz.
+`uart_comm_config.h` varsayılanları: RX halka 256, scratch 32, RX tur bütçesi 64; TX öğesi 64, kuyruk 8; task stack 512 word, native priority 25. Mevcut sample/abort/TX timeout ve sınırlı RX restart politikaları aynı kalır. RX halka2'nin kuvveti2..32768'dir; uint32 sayaç sarımında DMA konumu korunur. Init8N1 ve byte hizalı/memory increment açık DMA bağlantısını doğrular. Desteklenen ayar aralıkları derleme zamanında kontrol edilir; kuyruk/dizi boyutları birbirinden bağımsız sabitlerle ayrışmaz.
 
 ## Değişmeyen güvenilirlik koşulları
 

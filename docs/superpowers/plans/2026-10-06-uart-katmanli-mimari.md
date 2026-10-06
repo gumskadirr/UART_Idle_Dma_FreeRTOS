@@ -1,6 +1,6 @@
 # Taşınabilir UART Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans for inline execution, or superpowers:subagent-driven-development if the user selects delegation. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans for inline execution, or superpowers:subagent-driven-development if the user selects delegation. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** UART kaynaklarını protokolden ayırıp STM32F4 + HAL + FreeRTOS projelerine kopyalanabilir hale getirmek.
 
@@ -70,25 +70,54 @@
 
 **Interfaces:** Config sabitleri `UART_RX_BUF_SIZE`, `UART_RX_SCRATCH_SIZE`, `UART_RX_SERVICE_BUDGET`, `UART_RX_TIMEOUT_MS`; `UART_TX_BUF_SIZE=64U`, `COMM_QUEUE_SIZE=8U`, `COMM_STACK_SIZE=512U`, `COMM_TASK_PRIORITY=25U`; mevcut retry/sample/abort/recovery süre isimleri ve değerleri korunur. Derleme zamanı override'lar `#ifndef` ile desteklenir. RX halka 2'nin kuvveti 2..32768 (uint32 sayaç sarımında DMA konumu korunur), scratch 1..halka, bütçe 1..65535, TX öğesi 1..65535; kuyruk/stack/süreler sıfır olamaz, süreler uint32 yarım aralığından küçük olmalı; RTOS priority `configMAX_PRIORITIES` altında olmalı.
 
-- [ ] `test_uart_portable.py` protokol kaynakları/include dizini olmadan UART çekirdeğini ve portu gerçek HAL/RTOS header'larıyla ARM için derlesin; ham RX/TX uygulama örneğini USART1/DMA2 Stream2 RX Channel4, DMA2 Stream7 TX Channel4 ile bağlasın. Alternatif proje context'i ayrı/ignored `.build/portable/` altında olsun; mevcut UART kaynakları kopyalanmadan/doğrudan aynı dosyalardan derlensin. Eksik paket/config/arayüz nedeniyle ilk RED'i kaydet.
-- [ ] Dosyaları taşı, config ve boyut kontrollerini uygula; public header config'i include etsin, internal header protokolü include etmesin. `.cproject` Debug/Release sourceEntry `Lib/Uart` ve include `../Lib/Uart` ekle. Eski UART dosyalarını bırakma. CubeIDE makefile'ları headless derleme ile yeniden üretsin.
-- [ ] Bağımsız örneği derle; UART paketinin unresolved symbol listesinde `frame_`, `crc16_`, `protocol_`, `app_protocol_` olmayacağını doğrula. Farklı UART örneği compile/link entegrasyon kanıtıdır; pin ve fiziksel test kanıtı olarak sunulmaz. Sıfır/geçersiz boyut ve desteklenmeyen priority ayarlarını derleyicinin reddettiğini denetle; varsayılan konfigürasyon hatasız derlensin.
-- [ ] README'de kopyalama, CubeIDE include/source ekleme, RX circular/TX normal DMA, RTOS güvenli IRQ priority, HAL callback/IRQ forwarding, init/send/raw RX ve isteğe bağlı protokol adaptör örneğini yaz. Yeni UART taskı oluşturulmayacağını ve handler'ların beklemeyeceğini belirt. Kendi source paketimiz dış bağımlılık değildir; yeni kütüphane indirme/kurma işlemi yapılmaz.
-- [ ] Tüm PC suite'leri ve bağımsız entegrasyon derlemesini çalıştır; yerel commit kaydet.
+- [x] `test_uart_portable.py` protokol kaynakları/include dizini olmadan UART çekirdeğini ve portu gerçek HAL/RTOS header'larıyla ARM için derlesin; ham RX/TX uygulama örneğini USART1/DMA2 Stream2 RX Channel4, DMA2 Stream7 TX Channel4 ile bağlasın. Alternatif proje context'i ayrı/ignored `.build/portable/` altında olsun; mevcut UART kaynakları kopyalanmadan/doğrudan aynı dosyalardan derlensin. Eksik paket/config/arayüz nedeniyle ilk RED'i kaydet.
+- [x] Dosyaları taşı, config ve boyut kontrollerini uygula; public header config'i include etsin, internal header protokolü include etmesin. `.cproject` Debug/Release sourceEntry `Lib/Uart` ve include `../Lib/Uart` ekle. Eski UART dosyalarını bırakma. CubeIDE makefile'ları headless derleme ile yeniden üretsin.
+- [x] Bağımsız örneği derle; UART paketinin unresolved symbol listesinde `frame_`, `crc16_`, `protocol_`, `app_protocol_` olmayacağını doğrula. Farklı UART örneği compile/link entegrasyon kanıtıdır; pin ve fiziksel test kanıtı olarak sunulmaz. Sıfır/geçersiz boyut ve desteklenmeyen priority ayarlarını derleyicinin reddettiğini denetle; varsayılan konfigürasyon hatasız derlensin.
+- [x] README'de kopyalama, CubeIDE include/source ekleme, RX circular/TX normal DMA, RTOS güvenli IRQ priority, HAL callback/IRQ forwarding, init/send/raw RX ve isteğe bağlı protokol adaptör örneğini yaz. Yeni UART taskı oluşturulmayacağını ve handler'ların beklemeyeceğini belirt. Kendi source paketimiz dış bağımlılık değildir; yeni kütüphane indirme/kurma işlemi yapılmaz.
+- [x] Tüm PC suite'leri ve bağımsız entegrasyon derlemesini çalıştır; yerel commit kaydet.
 
 ## Task 4: CubeIDE, kart ve son kabul
 
 **Files:** `UART_COMM_KULLANIM.md`, `UART_RTOS_UYGULAMA_PLANI.md`, bu planın kanıt/kontrol kutuları; build/test çıktıları yalnız ignored `.build/` altında.
 
-- [ ] CubeIDE headless `-cleanBuild UART_IDLE_DMAv2/Debug` ve `-cleanBuild UART_IDLE_DMAv2/Release` çalıştır; loglarda iki tam derleme 0 error/0 warning olmalı. IDE env-hash gürültüsünü ayıkla. `.ioc`, pin/peripheral/generated USER CODE dışı değişikliklerini diff ile denetle.
-- [ ] `tools/build.sh test`, `serial`, üretim kiplerini sırayla derle; her ELF'i `.build/board-tests/layered-native.elf`, `layered-ch340.elf`, `layered-production.elf` olarak ayrı kaydet. Kipler aynı çıktı klasörünü kullandığından paralel çalıştırma. Her kipte 0 error/0 warning; üretimde test kancaları ve HAL callback çiftleri yok.
-- [ ] `python tools/run_board_tests.py --stop loopback_testi_kosur --elf .build/board-tests/layered-native.elf`: scheduler öncesi birim29/29 kontrolü. PA2–PA3 jumper çıkarılmış olduğundan native loopback kabulünü koşulmuş diye raporlama.
-- [ ] CH340 firmware'i `--serial --elf .../layered-ch340.elf` ile yükle. `python tools/test_uart_serial.py --port COM18 --output .build/board-tests/layered-ch340-results.json`, ardından `--metrics-only` ve `--sink-order-probe` kipleriyle ayrı JSON'lar üret. 11 veri/yük +1 metrics +1 sıra, toplam13 kontrol PASS; idle10sn UART servis turu0 olmalı. CPU servis+ISR ölçümü olarak etiketlenir; tam task runtime hedefi ayrıca açık kalır.
-- [ ] IRQ/owner sınırları, error+done önceliği, callback içi enqueue, timeout/reset, foreign handle ve DMA temizliği için bağımsız final review iste. Önemli bulgu varsa tetikleyici regresyon ile RED→GREEN; sadece etkilenen testleri ve gerekli kabulü tekrar koş.
-- [ ] `python tools/run_board_tests.py --production --elf .build/board-tests/layered-production.elf` ile üretimi geri yükle; initialized=1, rx_ready=1, tx_accepting=1, TX_IDLE kontrolü. ELF SHA256, gerçek test sayıları ve açık kalan sınırları mevcut belgelere kaydet. Sonuç/kısıtları Türkçe bildir; bu aşamadaki kodun henüz remote'a pushlanmadığını açıkça belirt.
+- [x] CubeIDE headless `-cleanBuild UART_IDLE_DMAv2/Debug` ve `-cleanBuild UART_IDLE_DMAv2/Release` çalıştır; loglarda iki tam derleme 0 error/0 warning olmalı. IDE env-hash gürültüsünü ayıkla. `.ioc`, pin/peripheral/generated USER CODE dışı değişikliklerini diff ile denetle.
+- [x] `tools/build.sh test`, `serial`, üretim kiplerini sırayla derle; her ELF'i `.build/board-tests/layered-native.elf`, `layered-ch340.elf`, `layered-production.elf` olarak ayrı kaydet. Kipler aynı çıktı klasörünü kullandığından paralel çalıştırma. Her kipte 0 error/0 warning; üretimde test kancaları ve HAL callback çiftleri yok.
+- [x] `python tools/run_board_tests.py --stop loopback_testi_kosur --elf .build/board-tests/layered-native.elf`: scheduler öncesi birim29/29 kontrolü. PA2–PA3 jumper çıkarılmış olduğundan native loopback kabulünü koşulmuş diye raporlama.
+- [x] CH340 firmware'i `--serial --elf .../layered-ch340.elf` ile yükle. `python tools/test_uart_serial.py --port COM18 --output .build/board-tests/layered-ch340-results.json`, ardından `--metrics-only` ve `--sink-order-probe` kipleriyle ayrı JSON'lar üret. 11 veri/yük +1 metrics +1 sıra, toplam13 kontrol PASS; idle10sn UART servis turu0 olmalı. CPU servis+ISR ölçümü olarak etiketlenir; tam task runtime hedefi ayrıca açık kalır.
+- [x] IRQ/owner sınırları, error+done önceliği, callback içi enqueue, timeout/reset, foreign handle ve DMA temizliği için bağımsız final review iste. Önemli bulgu varsa tetikleyici regresyon ile RED→GREEN; sadece etkilenen testleri ve gerekli kabulü tekrar koş.
+- [x] `python tools/run_board_tests.py --production --elf .build/board-tests/layered-production.elf` ile üretimi geri yükle; initialized=1, rx_ready=1, tx_accepting=1, TX_IDLE kontrolü. ELF SHA256, gerçek test sayıları ve açık kalan sınırları mevcut belgelere kaydet. Sonuç/kısıtları Türkçe bildir; bu aşamadaki kodun henüz remote'a pushlanmadığını açıkça belirt.
 
 ## Uygulama yöntemi ve başlangıç durumu
 
 Öneri: Aynı oturumda ana ajan uygulasın; tasklar birbirinin callback/context/port arayüzüne bağlıdır. Sonunda tek bağımsız inceleme yapılır. Delegasyon tercih edilirse kullanıcı bunu plan incelemesinde seçebilir.
 
-Tasarım 6 Ekim 2026'da kullanıcı tarafından `devam et` yanıtıyla onaylandı. Kullanıcı `planı uygula` yanıtıyla uygulamayı onayladı. Task1 ve Task2 model kanıtlarıyla tamamlandı; paket ve kart kabulü sürüyor. Başlangıç push'u `15df55a`, yerel tasarım commit'i `226eaf6`.
+Tasarım 6 Ekim 2026'da kullanıcı tarafından `devam et` yanıtıyla onaylandı. Kullanıcı `planı uygula` yanıtıyla uygulamayı onayladı. Task1–Task4 tamamlandı; model, protokolsüz entegrasyon, derleme ve CH340 kart kabulü kanıtları aşağıda kayıtlıdır. Başlangıç push'u `15df55a`, yerel tasarım commit'i `226eaf6`.
+
+
+## Son kabul — 6 Ekim 2026
+
+- RX35/35, TX23/23, RTOS17/17, port3/3: toplam78 model senaryosu PASS. Protokolsüz USART1/DMA2 ARM compile/link ve konfigürasyon kontrolü2/2 PASS; ikinci kontrolde10 hatalı seçenek derlemede reddedildi. Mevcut70 senaryo korunmuştur.
+- CubeIDE Debug/Release tam derlemeleri ve ayrı native/CH340/üretim derlemeleri0 hata/0 uyarı. `.ioc`, pin/DMA/NVIC, FreeRTOSConfig ve generated USER CODE dışı HAL ayarları değiştirilmedi. Üretim ELF'inde test sembolü yok; tek UART taskı ve proje callback seti var, DMA tamponu normal SRAM'de.
+- Kartta native protocol birim29/29 geçti; loopback/diğer native kabul testleri jumper çıkarıldığı için tekrar koşulmadı. CH340:11 veri/yük +1 metrics +1 sıra,13/13 PASS. Physical BREAK RX restart delta1; TX kuyruğu8 kabul/1 görünür drop; DMA/SEQ sarımı520 çerçeve.
+- Idle10sn/0 UART servis turu.100Hz çift yön1000TX/1000RX,10087ms, servis+ISR CPU%1,521. Sürekli64bayt1000TX/1000RX,5697ms,%7,908. Stack boş379/512word; kritik1228cycle=7,31µs, IRQ1852cycle=11,02µs, RX latency7659cycle=45,59µs; frame handler2850cycle, result handler153cycle, max service45287cycle. Ölçüm bütün task runtime'ı değildir.
+- Bağımsız `layered_uart_review`: yeni Critical/Important regresyon yok. İnceleme read-only kaynak/log kontrolüne dayanıyor; reviewer'ın PC binary tekrar çalıştırması Windows DLL relocation623 nedeniyle başlamadı. Ana ajanın fresh model/kart koşuları yukarıdadır.
+- Minor, ertelendi: `uart_comm.h` ve internal header send açıklamaları varsayılan1..64 byte diyor; gerçek ayarlanabilir sınır `UART_TX_BUF_SIZE`. README bunu doğru anlatıyor, çalışmayı etkilemiyor. Başka kod değişikliği gerektiren bulgu yok.
+
+### Kararlar ve kabul sınırları
+
+- Mevcut `uart-birlesik` checkout kullanıldı; CubeIDE ve kart araçlarının bu projeye bağlı yolu korundu. Yeni kod yerel checkout/commit'lerdedir; başlangıç push'u `15df55a` geri dönüş noktasıdır.
+- RX halka2'nin kuvveti2..32768: uint32 mutlak sayaç sarımında `% ring` hizası korunur. Bedeli: keyfi halka boyutu desteklenmez.
+- Init8N1, byte hizalı ve memory increment açık DMA ister; daha geniş DMA elemanı byte tamponunu aşmamalı. Bedeli:9bit/parity ve farklı DMA hizalaması bu sürümde reddedilir.
+- Timeout son **gözlenen** üretici ilerlemesine bağlıdır. Scratch teslimi/uzun handler sonraki deadline'ı ilerletmez; ilk ilerlemenin task tarafından gözlenmesine kadarki gecikme için yeni bir donanım timestamp'i eklenmedi. Mevcut baseline davranışı korunur; gerçek wire zamanından kesin50ms sınırı iddia edilmez.
+- Tam UART task CPU hedefi ve global iki-üreticili enqueue trace kabulü önceki planın açık işleri olarak kalır. Bu refaktörün PASS sonuçları bu açıkları kapatmaz.
+- USART1/DMA2 fixture'i aynı çekirdeğin compile/link taşınabilirliğini doğrular; fiziksel USART1 kabulü değildir. Kartta bu çalışmada USART2/CH340 doğrulandı.
+- Kart kabulü ve son üretim geri yükleme ana ajan tarafından yapıldı; `PRODUCTION initialized=1 rx_ready=1 tx_accepting=1 tx_state=0 tasks=4` doğrulandı.
+
+### Firmware ve kanıtlar
+
+- Native `layered-native.elf`: `12317b9824804f802f37f7c056ed6add5181cf6d8f9a97c6b54a8ecbbe2bf99c`.
+- CH340 `layered-ch340.elf`: `591a0b587df198780babb78961da61c1f7c62d926ade0c2e744c58dfa1f1a463`.
+- **Kartta bırakılan üretim** `layered-production.elf`: `efc310c178a976222dc476013412bd533c1a84eb8c276778e07da364277d0acb`; text47236/data96/bss25104. Önceki readability üretimine göre text+996bayt, bss+16bayt; stack ve kuyruk boyutları aynı.
+- `.build/layered-final-{rx,tx,rtos,port,portable}.log`, `layered-final-ide-build.log`, `layered-{native,serial,production}-build.log`, `layered-production-symbols.log`.
+- `.build/portable/{build.log,symbols.log,uart-undefined.log,uart_usart1.elf}`; Core/Inc veya protokol kaynakları include/source listesinde yok, yalnız HAL/FreeRTOS konfigürasyon header'ları fixture alanına kopyalanır.
+- `.build/board-tests/layered-{native,serial,production}-smoke.log`, `layered-ch340-{results,metrics,order}.json`.

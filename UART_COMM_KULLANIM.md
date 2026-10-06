@@ -278,3 +278,14 @@ Dosya düzeni sadeleştirmesi sonunda karta bırakılan firmware: `.build/board-
 PC modelleri70/70, CH34013/13 geçti. CubeIDE Debug/Release ile normal test/CH340/üretim tam derlemeleri0 hata/0 uyarı; üretimde test kancaları yok ve tek UART taskı/callback seti var. Bağımsız inceleme yeni kritik/önemli regresyon bulmadı. Boş hatta10sn/0 UART turu;100Hz çift yön1000/1000 çerçevede ölçülen servis+ISR payı%1,481. Boş stack386/512word, kritik bölüm968cycle (5,76µs), IRQ1802cycle (10,73µs). Tam task runtime hedefi bu ölçümle kapatılmaz.
 
 **Güncel kart firmware'i** `.build/board-tests/readability-production.elf`, SHA256 `bdd5f6d7f25e0b8b6d2f4b3adbbf326ed3b194b70ec6ba9500619de502c41f65`. Üretim RX/TX başlangıcı doğrulandı ve kartta bırakıldı. Güncel kanıtlar `readability-ch340-results.json`, `readability-ch340-metrics.json`, `readability-ch340-order.json`, `readability-production-smoke.log` dosyalarındadır. Commit/push yapılmadı.
+
+
+## Katmanlı paket son kabulü — 6 Ekim 2026
+
+UART kaynakları `Lib/Uart` altında; parser/CRC bağımlılığı yok. `protocol_uart` aynı owner taskında çalışan isteğe bağlı adaptördür. Proje HAL callback'lerinin sahibi `main.c` USER CODE alanıdır; kütüphanenin handle alan olay kapılarına yönlendirilir. Yeni projeye kopyalama ve kullanım: [README](Lib/Uart/README.md).
+
+Model78/78; protokolsüz USART1/DMA2 ARM link/ayar kontrolü2/2 (10 hatalı config reddi); CubeIDE Debug/Release ve üç firmware kipi0 hata/0 uyarı. Kart birim29/29 ve CH34013/13 geçti; jumper çıkarıldığı için native loopback kabulü yeniden koşulmadı. Bağımsız inceleme kritik/önemli regresyon bulmadı. İki header yorumunda TX sınırı varsayılan64byte olarak kaldı; gerçek ayarlanabilir kapasite `UART_TX_BUF_SIZE`.
+
+Boş hatta10sn/0 UART turu;100Hz çift yön1000/1000 çerçevede ölçülen servis+ISR payı%1,521. Stack boş379/512word, kritik1228cycle (7,31µs), IRQ1852cycle (11,02µs), RX gecikmesi7659cycle (45,59µs). Tam task CPU runtime hedefi bu kısmi ölçümle kapatılmaz. Timeout gözlenen üretici ilerlemesine bağlıdır; ilk örneklemeden önceki task gecikmesi için gerçek wire zamanından kesin50ms garantisi yoktur.
+
+**Güncel kart firmware'i** `.build/board-tests/layered-production.elf`, SHA256 `efc310c178a976222dc476013412bd533c1a84eb8c276778e07da364277d0acb`. Üretim RX/TX başlangıcı doğrulandı ve kartta bırakıldı. Ayrıntılı sonuçlar, hashler ve kararlar [katmanlı uygulama planında](docs/superpowers/plans/2026-10-06-uart-katmanli-mimari.md); kanıtlar `.build/board-tests/layered-*` ve `.build/layered-*` altındadır.
