@@ -6,15 +6,15 @@ from test_uart_rx import ROOT
 
 CASES = ('fifo', 'validation', 'wrong_dma', 'epoch_fault', 'epoch_recovery', 'early_result', 'notify_context',
          'callback_reenqueue', 'task_wait_race', 'combined_error', 'fresh_wait', 'backlog_abort', 'counter_wrap',
-         'suspended_notify', 'deferred_recovery_one', 'deferred_recovery_eight')
+         'suspended_notify', 'deferred_recovery_one', 'deferred_recovery_eight', 'foreign_uart_events')
 def main():
     cc = pathlib.Path(r'C:\Program Files (x86)\Atollic\TrueSTUDIO for STM32 9.3.0\PCTools\bin\gcc.exe')
     env = os.environ.copy()
     env['PATH'] = str(cc.parent) + os.pathsep + env.get('PATH', '')
     out = ROOT / '.build/host-tests/comm_tests.exe'
     subprocess.run([str(cc), '-std=c99', '-Wall', '-Wextra', '-Werror', '-DUART_COMM_TEST', '-DUART_RTOS_MODEL',
-                    '-Itools/tests/rtos_model', '-Itools/tests/hal_model', '-ICore/Inc',
-                    'tools/tests/test_uart_comm.c', 'Core/Src/uart_comm.c', 'Core/Src/protocol.c', 'Core/Src/protocol_uart.c', '-o', str(out)], cwd=ROOT, env=env, check=True)
+                    '-Itools/tests/rtos_model', '-Itools/tests/hal_model', '-ICore/Inc', '-ILib/Uart',
+                    'tools/tests/test_uart_comm.c', 'Core/Src/uart_comm.c', 'Lib/Uart/uart_comm_port.c', 'tools/tests/hal_model/uart_callbacks.c', 'Core/Src/protocol.c', 'Core/Src/protocol_uart.c', '-o', str(out)], cwd=ROOT, env=env, check=True)
     failed = 0
     for case in CASES:
         result = subprocess.run([str(out), case], capture_output=True, text=True, env=env, cwd=ROOT)

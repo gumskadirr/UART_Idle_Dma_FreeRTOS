@@ -6,7 +6,8 @@
 uint32_t model_primask;
 static uint32_t tick;
 static USART_TypeDef regs = {.SR = USART_SR_TC};
-static DMA_Stream_TypeDef rx_stream, tx_stream;
+#define rx_stream model_dma_streams[5]
+#define tx_stream model_dma_streams[6]
 static DMA_HandleTypeDef dma_rx = { .Instance = &rx_stream, .State = HAL_DMA_STATE_READY };
 static DMA_HandleTypeDef dma_tx = { .Instance = &tx_stream, .State = HAL_DMA_STATE_READY };
 static UART_HandleTypeDef uart = {

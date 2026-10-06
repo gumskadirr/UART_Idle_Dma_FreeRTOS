@@ -230,7 +230,7 @@ void USART2_IRQHandler(void)
      yapi icin dogru degil. ErrorCallback gecikse veya hic gelmese bile
      alimin durdugu bu kancadan gorulur.
      Kanca YALNIZCA kayit yapar; toparlanma karari tuketici baglamindadir. */
-  uart_comm_on_uart_irq_exit();
+  uart_comm_on_uart_irq_exit(&huart2);
 
 #ifdef UART_COMM_TEST
   comm_test_irq_exit();

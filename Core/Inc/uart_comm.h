@@ -70,5 +70,10 @@ bool uart_comm_request_recovery(uint32_t directions);
 bool uart_comm_get_snapshot(uart_comm_snapshot_t *out);
 
 /* Yalniz USART IRQ baglantisi: HAL_UART_IRQHandler'dan sonra; uygulama API'si degil. */
-void uart_comm_on_uart_irq_exit(void);
+void uart_comm_on_rx_event(UART_HandleTypeDef *uart, uint16_t size);
+void uart_comm_on_error(UART_HandleTypeDef *uart);
+void uart_comm_on_rx_abort_complete(UART_HandleTypeDef *uart);
+void uart_comm_on_tx_complete(UART_HandleTypeDef *uart);
+void uart_comm_on_tx_abort_complete(UART_HandleTypeDef *uart);
+void uart_comm_on_uart_irq_exit(UART_HandleTypeDef *uart);
 #endif

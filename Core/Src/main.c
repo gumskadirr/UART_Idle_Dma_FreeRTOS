@@ -94,6 +94,12 @@ static const uart_comm_handlers_t uart_handlers = {
     .on_rx = protocol_uart_on_rx, .on_tx_result = on_tx_result, .rx_user = &uart_protocol
 };
 #endif
+/* Proje HAL callback'lerinin sahibi; diger UART'lar burada yonlendirilebilir. */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *uart, uint16_t size) { uart_comm_on_rx_event(uart, size); }
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *uart) { uart_comm_on_error(uart); }
+void HAL_UART_AbortReceiveCpltCallback(UART_HandleTypeDef *uart) { uart_comm_on_rx_abort_complete(uart); }
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *uart) { uart_comm_on_tx_complete(uart); }
+void HAL_UART_AbortTransmitCpltCallback(UART_HandleTypeDef *uart) { uart_comm_on_tx_abort_complete(uart); }
 /* USER CODE END 0 */
 
 /**

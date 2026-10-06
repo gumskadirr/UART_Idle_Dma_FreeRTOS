@@ -1,5 +1,6 @@
 #include "uart_comm.h"
 #include "uart_comm_internal.h"
+#include "uart_comm_port.h"
 #include <stddef.h>
 #include <string.h>
 /* ==================== RTOS / test configuration ==================== */
@@ -159,38 +160,13 @@ static void rx_set_phase(rx_phase_t phase)
 }
 
 /* Sahiplik kontrolu: herhangi bir etkin/abort halinde tampon kullanilamaz. */
-static uint8_t rx_hardware_active(const UART_HandleTypeDef *uart)
-{
-    if (uart == NULL) return 0U;
-    if (uart->RxState == HAL_UART_STATE_BUSY_RX ||
-        READ_BIT(uart->Instance->CR3, USART_CR3_DMAR) != 0U) return 1U;
-    if (uart->hdmarx == NULL || uart->hdmarx->Instance == NULL) return 0U;
-    return (uint8_t)(READ_BIT(uart->hdmarx->Instance->CR, DMA_SxCR_EN) != 0U ||
-                     uart->hdmarx->State == HAL_DMA_STATE_BUSY ||
-                     uart->hdmarx->State == HAL_DMA_STATE_ABORT);
-}
+static uint8_t rx_hardware_active(const UART_HandleTypeDef *uart) { return (uint8_t)uart_port_rx_active(uart); }
 
 /* Saglik kontrolu sahiplikten farklidir: butun kosullar saglanmalidir. */
-static uint8_t rx_hardware_healthy(void)
-{
-    return (uint8_t)(comm.uart->RxState == HAL_UART_STATE_BUSY_RX &&
-        comm.uart->ReceptionType == HAL_UART_RECEPTION_TOIDLE &&
-        comm.uart->hdmarx->State == HAL_DMA_STATE_BUSY &&
-        READ_BIT(comm.uart->Instance->CR3, USART_CR3_DMAR) != 0U &&
-        READ_BIT(comm.uart->hdmarx->Instance->CR, DMA_SxCR_EN) != 0U);
-}
+static uint8_t rx_hardware_healthy(void) { return (uint8_t)uart_port_rx_healthy(comm.uart); }
 
 /* Callback, durus kaniti degildir. Eski RX kaynaklari da kapanmis olmali. */
-static uint8_t rx_hardware_stopped(void)
-{
-    if (comm.uart == NULL) return 0U;
-    return (uint8_t)(comm.uart->RxState == HAL_UART_STATE_READY &&
-        comm.uart->hdmarx->State == HAL_DMA_STATE_READY &&
-        READ_BIT(comm.uart->Instance->CR3, USART_CR3_DMAR | USART_CR3_EIE) == 0U &&
-        READ_BIT(comm.uart->Instance->CR1,
-                 USART_CR1_IDLEIE | USART_CR1_RXNEIE | USART_CR1_PEIE) == 0U &&
-        READ_BIT(comm.uart->hdmarx->Instance->CR, DMA_SxCR_EN) == 0U);
-}
+static uint8_t rx_hardware_stopped(void) { return (uint8_t)uart_port_rx_stopped(comm.uart); }
 
 static uint8_t rx_fault_pending(void)
 {
@@ -222,8 +198,7 @@ static uint8_t rx_take_fault(uint32_t *when)
 static void rx_reset_progress(void)
 {
     uint32_t saved = lock();
-    __HAL_DMA_CLEAR_FLAG(comm.uart->hdmarx,
-                        __HAL_DMA_GET_TC_FLAG_INDEX(comm.uart->hdmarx));
+    uart_port_rx_clear_tc(comm.uart);
     comm.rx.wrap_base = comm.rx.consumed = 0U;
     comm.rx.session++;
     comm.rx.events.data = comm.rx.events.error = comm.rx.events.health = 0U;
@@ -243,18 +218,15 @@ UART_LOCAL uint32_t rx_producer_from(uint32_t wrap_base, uint8_t pending_tc, uin
 static uint8_t rx_sample_producer(uint32_t *out)
 {
     uint8_t attempt;
-    DMA_HandleTypeDef *dma;
     if (comm.uart == NULL || out == NULL) return 0U;
-    dma = comm.uart->hdmarx;
 #ifdef UART_COMM_TEST
     if (test.sample_fail) return 0U;
 #endif
     for (attempt = 0U; attempt < 3U; attempt++) {
         uint32_t saved = lock();
         uint32_t base = comm.rx.wrap_base;
-        uint32_t before = __HAL_DMA_GET_FLAG(dma, __HAL_DMA_GET_TC_FLAG_INDEX(dma));
-        uint32_t ndtr = __HAL_DMA_GET_COUNTER(dma);
-        uint32_t after = __HAL_DMA_GET_FLAG(dma, __HAL_DMA_GET_TC_FLAG_INDEX(dma));
+        uart_port_rx_sample_t sample = uart_port_rx_sample(comm.uart);
+        uint32_t before = sample.tc_before, ndtr = sample.ndtr, after = sample.tc_after;
         unlock(saved);
         if (before != after || ndtr == 0U || ndtr > UART_RX_BUF_SIZE) continue;
         *out = rx_producer_from(base, (uint8_t)(before != 0U), ndtr);
@@ -414,8 +386,7 @@ static void rx_enter_fault(void)
     if (!rx_hardware_stopped()) {
         uint32_t saved = lock();
         /* CR1/CR3 TX ile ortaktir; RX temizligi TX IRQ'nun yazisini ezmemeli. */
-        CLEAR_BIT(comm.uart->Instance->CR3, USART_CR3_DMAR | USART_CR3_EIE);
-        CLEAR_BIT(comm.uart->Instance->CR1, USART_CR1_IDLEIE | USART_CR1_RXNEIE | USART_CR1_PEIE);
+        uart_port_rx_mask_sources(comm.uart);
         unlock(saved);
         rx_stats.recovery_fails++;
     }
@@ -465,7 +436,7 @@ static void rx_try_restart(uint32_t now)
 {
     comm.rx.recovery.attempts++;
     comm.rx.recovery.retry_at = now + UART_RX_RESTART_RETRY_MS;
-    __HAL_UART_CLEAR_OREFLAG(comm.uart);
+    uart_port_rx_clear_errors(comm.uart);
     comm.uart->ErrorCode = HAL_UART_ERROR_NONE;
     rx_deliver(UART_COMM_RX_RESET, NULL, 0U);
 #ifdef UART_COMM_TEST
@@ -666,41 +637,12 @@ typedef struct {
 } tx_events_t;
 
 
-static void tx_disable_half_irq(void)
-{
-    /* F407 HTIE = CR bit 3. Aktif DMA'nin EN biti donanimda da degisebilir;
-     * tum CR'yi read-modify-write etmek bitleri eski degerle geri yazabilir.
-     * Peripheral bit-band yalniz HTIE'yi temizler. */
-#ifdef UART_HAL_MODEL
-    model_bitband_clear(&comm.uart->hdmatx->Instance->CR, DMA_IT_HT);
-#else
-    uintptr_t alias = PERIPH_BB_BASE +
-        ((uintptr_t)&comm.uart->hdmatx->Instance->CR - PERIPH_BASE) * 32U + 3U * 4U;
-    *(volatile uint32_t *)alias = 0U;
-#endif
-}
+static void tx_disable_half_irq(void) { uart_port_tx_disable_half_irq(comm.uart); }
 
 /* Tampon serbestligi ve hat sessizligi ayri ayri dogrulanir. */
-static uint8_t tx_hardware_stopped(const UART_HandleTypeDef *handle)
-{
-    if (handle == NULL) return 1U;
-    return (uint8_t)(handle->gState == HAL_UART_STATE_READY &&
-        handle->hdmatx->State == HAL_DMA_STATE_READY &&
-        READ_BIT(handle->hdmatx->Instance->CR, DMA_SxCR_EN) == 0U &&
-        READ_BIT(handle->Instance->CR3, USART_CR3_DMAT) == 0U &&
-        READ_BIT(handle->Instance->CR1, USART_CR1_TXEIE | USART_CR1_TCIE) == 0U &&
-        READ_BIT(handle->Instance->SR, USART_SR_TC) != 0U);
-}
+static uint8_t tx_hardware_stopped(const UART_HandleTypeDef *handle) { return (uint8_t)uart_port_tx_stopped(handle); }
 
-static void tx_clear_old_sources(void)
-{
-    DMA_HandleTypeDef *dma = comm.uart->hdmatx;
-    __HAL_DMA_CLEAR_FLAG(dma, __HAL_DMA_GET_TC_FLAG_INDEX(dma) |
-        __HAL_DMA_GET_HT_FLAG_INDEX(dma) | __HAL_DMA_GET_TE_FLAG_INDEX(dma) |
-        __HAL_DMA_GET_DME_FLAG_INDEX(dma) | __HAL_DMA_GET_FE_FLAG_INDEX(dma));
-    /* Yalniz TX DMA IRQ; ortak USART2 pending kaydi korunur. */
-    HAL_NVIC_ClearPendingIRQ(DMA1_Stream6_IRQn);
-}
+static void tx_clear_old_sources(void) { uart_port_tx_clear_sources(comm.uart); }
 
 /* Cagiran lock tutar. Yeni olay snapshot ile karar arasinda kaybolmaz. */
 static tx_events_t tx_take_events_locked(void)
@@ -869,8 +811,7 @@ UART_LOCAL void tx_service(void)
         tx_finish(UART_TX_IDLE, 0U);
     } else if ((now - comm.tx.abort_at) >= UART_TX_ABORT_TIMEOUT_MS) {
         /* Ortak USART register'larinda RX bitlerini koru. DMA EN zorlanmaz. */
-        CLEAR_BIT(comm.uart->Instance->CR3, USART_CR3_DMAT);
-        CLEAR_BIT(comm.uart->Instance->CR1, USART_CR1_TXEIE | USART_CR1_TCIE);
+        uart_port_tx_mask_sources(comm.uart);
         tx_finish(UART_TX_FAULT, 1U);
     }
     unlock(saved);
@@ -1147,19 +1088,7 @@ static void UartCommTask(void *argument)
 HAL_StatusTypeDef uart_comm_init(UART_HandleTypeDef *uart, const uart_comm_handlers_t *handlers)
 {
     if (comm.initialized) return HAL_BUSY;
-    if (__get_IPSR() || uart == NULL || handlers == NULL || uart->Instance == NULL ||
-        uart->hdmarx == NULL || uart->hdmatx == NULL ||
-        uart->hdmarx->Instance == NULL || uart->hdmatx->Instance == NULL ||
-        uart->hdmarx->Instance == uart->hdmatx->Instance) return HAL_ERROR;
-    if (uart->hdmarx->Parent != uart || uart->hdmatx->Parent != uart ||
-        uart->hdmarx->Init.Direction != DMA_PERIPH_TO_MEMORY || uart->hdmarx->Init.Mode != DMA_CIRCULAR ||
-        uart->hdmatx->Init.Direction != DMA_MEMORY_TO_PERIPH || uart->hdmatx->Init.Mode != DMA_NORMAL) return HAL_ERROR;
-#ifndef UART_HAL_MODEL
-    /* Bu surumun IRQ ve DMA flag baglantilari tek USART2 icindir. */
-    if (uart->Instance != USART2 || uart->hdmarx->Instance != DMA1_Stream5 ||
-        uart->hdmatx->Instance != DMA1_Stream6 ||
-        uart->hdmarx->Init.Channel != DMA_CHANNEL_4 || uart->hdmatx->Init.Channel != DMA_CHANNEL_4) return HAL_ERROR;
-#endif
+    if (__get_IPSR() || handlers == NULL || !uart_port_validate(uart)) return HAL_ERROR;
     if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED) return HAL_BUSY;
     if (rx_hardware_active(uart) || tx_init(uart) != HAL_OK) return HAL_ERROR;
     comm.uart = uart;
@@ -1282,11 +1211,12 @@ void comm_test_pause_owner(uint8_t pause)
 
 /* ==================== HAL callbacks / IRQ ==================== */
 
-void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *uart, uint16_t size)
+void uart_comm_on_rx_event(UART_HandleTypeDef *uart, uint16_t size)
 {
-    HAL_UART_RxEventTypeTypeDef type = HAL_UARTEx_GetRxEventType(uart);
+    HAL_UART_RxEventTypeTypeDef type;
     uint32_t saved;
-    if (uart != comm.uart) return;
+    if (uart == NULL || uart != comm.uart) return;
+    type = HAL_UARTEx_GetRxEventType(uart);
     saved = lock();
     rx_stats.rx_events++;
     rx_stats.last_size = size;
@@ -1312,8 +1242,9 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *uart, uint16_t size)
     COMM_NOTIFY();
 }
 
-void uart_comm_on_uart_irq_exit(void)
+void uart_comm_on_uart_irq_exit(UART_HandleTypeDef *uart)
 {
+    if (uart == NULL || uart != comm.uart) return;
     if (comm.rx.phase == UART_RX_PHASE_RUNNING && !rx_hardware_healthy() && !comm.rx.events.health) {
         rx_stats.irq_health_events++;
         rx_signal_fault(1U);
@@ -1321,9 +1252,11 @@ void uart_comm_on_uart_irq_exit(void)
     }
 }
 
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *uart)
+void uart_comm_on_error(UART_HandleTypeDef *uart)
 {
-    uint32_t error = uart->ErrorCode;
+    uint32_t error;
+    if (uart == NULL || uart != comm.uart) return;
+    error = uart->ErrorCode;
     rx_on_error(uart, error);
     if ((error & HAL_UART_ERROR_DMA) != 0U) tx_on_error(uart, error);
     /* Thread baglaminda notify owner'i hemen calistirabilir: iki yonun ham
@@ -1331,9 +1264,9 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *uart)
     COMM_NOTIFY();
 }
 
-void HAL_UART_AbortReceiveCpltCallback(UART_HandleTypeDef *uart) { rx_on_abort_complete(uart); }
+void uart_comm_on_rx_abort_complete(UART_HandleTypeDef *uart) { rx_on_abort_complete(uart); }
 
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *handle)
+void uart_comm_on_tx_complete(UART_HandleTypeDef *handle)
 {
     uint32_t saved;
     if (handle == NULL || handle != comm.uart) return;
@@ -1347,8 +1280,9 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *handle)
     COMM_NOTIFY();
 }
 
-void HAL_UART_AbortTransmitCpltCallback(UART_HandleTypeDef *handle)
+void uart_comm_on_tx_abort_complete(UART_HandleTypeDef *handle)
 {
+    if (handle == NULL || handle != comm.uart) return;
 #ifdef UART_COMM_TEST
     if (test_drop_abort) return;
 #endif

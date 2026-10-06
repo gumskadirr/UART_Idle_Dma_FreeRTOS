@@ -256,6 +256,29 @@ static int deferred_recovery(unsigned count)
     step(); CHECK(uart_comm_get_snapshot(&snap) && snap.tx_accepting && snap.tx_state == UART_TX_IDLE);
     CHECK(comm_test_next_wait() == UINT32_MAX && !violations); return 0;
 }
+static int foreign_uart_events(void)
+{
+    UART_HandleTypeDef foreign = uart;
+    uart_comm_snapshot_t before, after;
+    uint32_t rx_before, tx_before, wait;
+    int notify_before;
+    CHECK(setup() == 0);
+    uart_comm_get_snapshot(&before);
+    rx_before = rx_stats.rx_events; tx_before = tx_stats.tx_complete_events;
+    notify_before = notifications + isr_notifications;
+    wait = comm_test_next_wait(); foreign.ErrorCode = HAL_UART_ERROR_DMA;
+    uart_comm_on_rx_event(&foreign, 17U); uart_comm_on_error(&foreign);
+    uart_comm_on_rx_abort_complete(&foreign); uart_comm_on_tx_complete(&foreign);
+    uart_comm_on_tx_abort_complete(&foreign); uart_comm_on_uart_irq_exit(&foreign);
+    uart_comm_on_rx_event(NULL, 17U); uart_comm_on_error(NULL);
+    uart_comm_on_rx_abort_complete(NULL); uart_comm_on_tx_complete(NULL);
+    uart_comm_on_tx_abort_complete(NULL); uart_comm_on_uart_irq_exit(NULL);
+    uart_comm_get_snapshot(&after);
+    CHECK(!memcmp(&before, &after, sizeof(before)));
+    CHECK(rx_stats.rx_events == rx_before && tx_stats.tx_complete_events == tx_before);
+    CHECK(notifications + isr_notifications == notify_before && comm_test_next_wait() == wait);
+    return 0;
+}
 int main(int argc, char **argv)
 {
     if (argc != 2) return 2;
@@ -275,5 +298,6 @@ int main(int argc, char **argv)
     if (!strcmp(argv[1], "suspended_notify")) return suspended_notify();
     if (!strcmp(argv[1], "deferred_recovery_one")) return deferred_recovery(1U);
     if (!strcmp(argv[1], "deferred_recovery_eight")) return deferred_recovery(8U);
+    if (!strcmp(argv[1], "foreign_uart_events")) return foreign_uart_events();
     return 2;
 }

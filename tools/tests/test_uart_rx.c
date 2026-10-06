@@ -30,8 +30,8 @@ static void test_rx_set_handler(frame_handler_t handler, void *user)
 uint32_t model_primask;
 static uint32_t tick;
 static USART_TypeDef regs;
-static DMA_Stream_TypeDef stream;
-static DMA_HandleTypeDef dma = { &stream, HAL_DMA_STATE_READY };
+#define stream model_dma_streams[5]
+static DMA_HandleTypeDef dma = { .Instance = &stream, .State = HAL_DMA_STATE_READY };
 static UART_HandleTypeDef uart = {
     .Instance = &regs, .hdmarx = &dma, .RxState = HAL_UART_STATE_READY,
     .RxEventType = HAL_UART_RXEVENT_IDLE, .gState = HAL_UART_STATE_READY
@@ -305,7 +305,7 @@ static int stopped_irq(void)
     CHECK(start() == 0);
     uart.RxState = HAL_UART_STATE_READY; regs.CR3 &= ~USART_CR3_DMAR;
     dma.State = HAL_DMA_STATE_ABORT; /* EN hala set, UART error callback gecikti. */
-    uart_comm_on_uart_irq_exit();
+    uart_comm_on_uart_irq_exit(&uart);
     CHECK(rx_next_wait_ms(tick) == 0);
     return 0;
 }
