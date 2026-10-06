@@ -1,8 +1,8 @@
 # Birleşik UART RX/TX mimarisi ve uygulama yol haritası
 
 Tarih: 5 Ekim 2026  
-Revizyon: **2 — ikinci mimari incelemesindeki düzeltmeler işlendi.**  
-Durum: **İncelenecek mimari ve uygulama planı; firmware değişikliği yapılmadı.**  
+Revizyon: **3 — birleşik modül ve FreeRTOS uygulaması işlendi (6 Ekim 2026).**
+Durum: **RX/TX tek uart_comm modülünde; tek statik FreeRTOS owner, FIFO ve public API uygulanmış durumda. Güncel son kabul kaydı: UART_RTOS_UYGULAMA_PLANI.md.**
 Hedef: STM32F407VG, STM32 HAL, STM32CubeIDE.
 
 > Uygulayıcı için: Adımlar sırayla yürütülür. Her adımın test ve geçiş koşulu tamamlanmadan sonraki adıma geçilmez. Uygulamaya başlanacağı zaman `superpowers:executing-plans` veya kullanıcı tarafından seçilirse `superpowers:subagent-driven-development` yöntemi kullanılabilir. Bu belgenin hazırlanması kodlama adımlarının tamamlandığı anlamına gelmez.
@@ -11,7 +11,7 @@ Hedef: STM32F407VG, STM32 HAL, STM32CubeIDE.
 
 **Mimari:** Circular RX DMA ve Normal TX DMA aynı anda çalışır. Tek `UartCommTask`, iki ayrı iç durum makinesini, RX parser'ını ve kopya taşıyan TX kuyruğunu yönetir. Kesme yolları kısa olay/bilgi kaydı yapar; task boşta bildirim bekleyerek uyur.
 
-**Teknoloji:** Mevcut HAL, CMSIS çekirdek tanımları, mevcut CRC/çerçeve/parser kodu; RTOS aşamasında FreeRTOS. Yeni üçüncü taraf kütüphane gerekmiyor. FreeRTOS'un projeye eklenmesi/taşınması ayrı entegrasyon adımında yapılacak.
+**Teknoloji:** Mevcut HAL, CMSIS çekirdek tanımları, mevcut CRC/çerçeve/parser kodu; RTOS aşamasında FreeRTOS. Yeni üçüncü taraf kütüphane gerekmiyor. FreeRTOS kullanıcı tarafından CubeMX ile eklenmiştir; mevcut kurulum kullanıldı, yeni kütüphane eklenmedi.
 
 **Tasarım şartnamesi:** Bu belgenin 1–7. bölümleri. Uygulama sırası: 8–13. bölümler. Kullanıcı isteği gereği tasarım ve ayrıntılı yol haritası aynı yeni dosyada tutuluyor.
 
@@ -37,7 +37,7 @@ Kullanıcı tek task ve düşük CPU hedefini belirtti. Hedef FreeRTOS projesini
 
 İlk sürüm tek UART içindir. Çoklu UART, RS485 yön kontrolü, donanım akış kontrolü, ACK/tekrar gönderim ve komuta özgü cihaz davranışları bu çalışmanın dışında tutulur. Protokol alanları değiştirilmez.
 
-### 1.3. Gerçek kod durumu
+### 1.3. Plan yazılırken görülen başlangıç durumu (tarihsel)
 
 | Bileşen | 5 Ekim çalışma ağacında görülen durum |
 |---|---|
@@ -51,6 +51,15 @@ Kullanıcı tek task ve düşük CPU hedefini belirtti. Hedef FreeRTOS projesini
 | NVIC | GROUP_0 ve UART/DMA öncelikleri 0; `FromISR` kullanımı için değişmeli |
 
 `UART_RX_TX_RTOS_YOL_HARITASI.md` referanstır; başlangıç tablosundaki “TX DMA yok” ve “RX zaman aşımı yok” bilgileri artık eski. `ACIK_BULGULAR.md` önceki üç bulgunun kapanışını anlatır; bütün RX/TX altyapısının tamamlandığı anlamına gelmez. `docs/superpowers/plans/2026-10-02-uart-guvenilirlik.md` içindeki güvenilirlik işleri bu planda RX önce olacak şekilde yeniden sıralanmıştır. Yeni çalışma için sıralama ve nihai dosya düzeninde bu belge esas alınır.
+
+
+### 1.4. Güncel uygulama durumu — 6 Ekim 2026
+
+- Nihai kaynak `Core/Src/uart_comm.c`, public header `Core/Inc/uart_comm.h`; eski dört RX/TX dosyası kaldırıldı. Özel kapılar yalnız test derlemesinde dışarı açılır.
+- USART2/PA2–PA3/115200 8N1/DMA atamaları ve kullanıcının CubeMX ayarları korundu. FreeRTOS 10.3.1 ARM_CM4F; CMSIS-v2 kernel kurulumu yanında UART modülü native API kullanır. HAL 1.8.5, TIM6 HAL tick, SysTick RTOS 1000 Hz, GROUP4 ve üç UART/DMA IRQ priority 5.
+- Tek statik owner priority 25/512 stack elemanı, 8 kopyalı FIFO +1 aktif öğe, tag/epoch, tek sonuç teslimi ve korumalı snapshot. Dört fonksiyonlu kullanım örneği: [UART_COMM_KULLANIM.md](UART_COMM_KULLANIM.md).
+- F1'in geçici modül yönlendirme kapıları fiziksel birleşme önce yapıldığı için kurulmadı; aynı kayıt/notification sözleşmesi doğrudan birleşik callback'lerde doğrulandı. F1/F2 owner entegrasyonu birlikte yapıldı; her sözleşme ayrı model/kart kabul kontrolü ile doğrulandı. M1 kutuları saf taşıma ve ardından regresyonun birleşik kanıtını ifade eder.
+- Tarihsel kod örnekleri/adım adları API dokümantasyonu yerine geçmez. Kesin firmware, test ve ölçüm sonuçları [uygulama kaydında](UART_RTOS_UYGULAMA_PLANI.md). Native loopback kabulü71/71, birim29/29, loopback15/15; son harici CH340 kontrolü13/13 geçti. CH340100Hz çift yön trafikte ölçülen UART servis+ISR payı yaklaşık%1,47; 10sn boş hatta UART servis turu0. Bekleme/notification yönetimi tam task runtime ölçümüne dahil olmadığından bütün UART taskı için CPU hedefi ve ayrıntılı plan/test açıkları ayrıca kayıtlıdır; F3/M2'nin her maddesi koşulsuz kapanmış sayılmaz.
 
 ## 2. Neden aşamalı birleştirme?
 
@@ -525,15 +534,19 @@ Uyku öncesi son kontrolden sonra gelen ISR veya üretici isteği notification'd
 
 ### T1 — Hata kapıları ve tutarlı olay alma
 
+2026-10-05: T1–T4 doğrulama kanıtları ve model/kart ayrımı
+[`UART_UYGULAMA_DURUMU.md`](UART_UYGULAMA_DURUMU.md) dosyasındadır.
+Bu önceki kabul koşusunun kapsamıydı. Kullanıcının son birleşme/FreeRTOS isteğiyle F0–M2 yeniden kapsama alındı; güncel kayıt UART_RTOS_UYGULAMA_PLANI.md içindedir.
+
 **Bağımlılık:** R5.  
 **Dosyalar:** `uart_tx.c/.h`, geçici ortak callback sahibi `uart_rx.c`, test dosyaları.  
 **Arayüz:** Header'da mevcut `uart_tx_on_error(UART_HandleTypeDef *, uint32_t)` ve `uart_tx_on_abort_complete(UART_HandleTypeDef *)` uygulanır.
 
-- [ ] `TX_DMA_ERROR_REPORTED`: HAL DMA hata kaydı TX servisince görülsün. `RX_LINE_ERROR_PRESERVES_TX`: yalnız FE/NE/ORE/PE TX'i iptal ettirmesin.
-- [ ] Ortak callback ErrorCode'u bir kez yakalayıp RX'e; DMA biti varsa TX'e bildirsin. Yön kararı için callback girişindeki gState tek başına kullanılmasın.
-- [ ] TX done/error/abort bayrakları ve ham error bits aynı kısa kritik bölümde snapshot olarak alınsın. Callback sıradaki aktarımı başlatmasın.
-- [ ] Bölüm 6.1'deki aktif deneme kaydını ekle; aktif TX yokken gelen DMA error kaydını sonraki denemenin hatası diye yorumlama. T3 abort akışı yazılana kadar aktif TX hatasında konservatif FAULT ile tamponu kilitle; hata+done başarı sayılmasın.
-- [ ] `TX_DONE_AND_ERROR`: aynı tur hata+done geldiğinde başarı sayılmasın. `TX_EVENT_DURING_TAKE`: snapshot sırasında/sonrasında gelen olay kaybolmasın.
+- [x] `TX_DMA_ERROR_REPORTED`: HAL DMA hata kaydı TX servisince görülsün. `RX_LINE_ERROR_PRESERVES_TX`: yalnız FE/NE/ORE/PE TX'i iptal ettirmesin.
+- [x] Ortak callback ErrorCode'u bir kez yakalayıp RX'e; DMA biti varsa TX'e bildirsin. Yön kararı için callback girişindeki gState tek başına kullanılmasın.
+- [x] TX done/error/abort bayrakları ve ham error bits aynı kısa kritik bölümde snapshot olarak alınsın. Callback sıradaki aktarımı başlatmasın.
+- [x] Bölüm 6.1'deki aktif deneme kaydını ekle; aktif TX yokken gelen DMA error kaydını sonraki denemenin hatası diye yorumlama. T3 abort akışı yazılana kadar aktif TX hatasında konservatif FAULT ile tamponu kilitle; hata+done başarı sayılmasın.
+- [x] `TX_DONE_AND_ERROR`: aynı tur hata+done geldiğinde başarı sayılmasın. `TX_EVENT_DURING_TAKE`: snapshot sırasında/sonrasında gelen olay kaybolmasın.
 
 **Geçiş koşulu:** Olay ile karar ayrılmış; RX başlatmasının HAL ErrorCode'u temizlemesi TX hata bilgisini yok etmiyor. Bu aşamada callback tek tanımlı kalır.
 
@@ -543,13 +556,13 @@ Uyku öncesi son kontrolden sonra gelen ISR veya üretici isteği notification'd
 **Dosyalar:** `uart_tx.c/.h`, test dosyaları.  
 **Arayüz:** `uart_tx_send_copy(const uint8_t *data, uint16_t len)`; enum'a `UART_TX_START_BUSY`, `UART_TX_START_ERROR` eklenir. Mevcut `UART_TX_BUSY` yalnız modülün aktif/aborting meşguliyetidir.
 
-- [ ] `TX_INVALID_LENGTH`: 0/65/256 ve NULL reddedilsin. `TX_SOURCE_COPY` ve `TX_SECOND_SEND_BUSY` mevcut testlerini koru.
-- [ ] Init ve send öncesi sahiplik/donanım koşullarını kontrol et. SENDING/ABORTING sırasında init HAL_BUSY; güvenli duruşu doğrulanmamış FAULT'ta reset yok.
-- [ ] Eski olayları ve yalnız TX'e ait eski donanım kaynaklarını temizleyip buffer/length/start_tick/state'i HAL çağrısından önce tutarlı kur.
-- [ ] `TX_ERROR_BETWEEN_SERVICE_AND_START`: servis snapshot'ından sonra, yeni TX kurulmadan önce DMA hatası ver; eski olay yeni aktarıma mal edilmesin veya silinmesin. `TX_ERROR_DURING_HAL_START`: yeni deneme yayımlandıktan sonra gelen hata korunsun ve T3'te o denemenin abort'unu doğursun.
-- [ ] HAL_OK sonrası her TX başlangıcında gerekmeyen TX HT kesmesini `__HAL_DMA_DISABLE_IT(huart->hdmatx, DMA_IT_HT)` ile kapat; RX HT ve TX TC/error kesmeleri açık kalsın. HAL çağrısı dönmeden olası HT oluşması güvenli olmalı; TX half callback task bildirimi üretmesin. Amaç gereksiz yarım-gönderim kesme yükünü azaltmak.
-- [ ] HAL_OK, HAL_BUSY ve HAL_ERROR'u ayrı kaydet. Hata halinde güvenli duruş biliniyorsa IDLE; belirsizse bu adımda konservatif FAULT ile tamponu kilitle. Otomatik ABORTING geçişi T3'te eklenecek; T2 henüz yazılmamış abort fonksiyonuna bağımlı kalmayacak. Üst katman başarısız dönüşte çerçeveyi kendi isteği olmadan tekrar göndermez.
-- [ ] `TX_COMPLETE_BEFORE_HAL_RETURN`, `TX_HAL_START_BUSY`, `TX_HAL_START_ERROR` testlerini çalıştır. Tampon aktifken değiştirilmesin; HAL başlangıç hatası başarı sayılmasın.
+- [x] `TX_INVALID_LENGTH`: 0/65/256 ve NULL reddedilsin. `TX_SOURCE_COPY` ve `TX_SECOND_SEND_BUSY` mevcut testlerini koru.
+- [x] Init ve send öncesi sahiplik/donanım koşullarını kontrol et. SENDING/ABORTING sırasında init HAL_BUSY; güvenli duruşu doğrulanmamış FAULT'ta reset yok.
+- [x] Eski olayları ve yalnız TX'e ait eski donanım kaynaklarını temizleyip buffer/length/start_tick/state'i HAL çağrısından önce tutarlı kur.
+- [x] `TX_ERROR_BETWEEN_SERVICE_AND_START`: servis snapshot'ından sonra, yeni TX kurulmadan önce DMA hatası ver; eski olay yeni aktarıma mal edilmesin veya silinmesin. `TX_ERROR_DURING_HAL_START`: yeni deneme yayımlandıktan sonra gelen hata korunsun ve T3'te o denemenin abort'unu doğursun.
+- [x] HAL_OK sonrası her TX başlangıcında gerekmeyen TX HT kesmesini atomik tek-bit yazmasıyla kapat; RX HT ve TX TC/error kesmeleri açık kalsın. F407 uygulaması peripheral bit-band kullanır: yerel HAL'in `__HAL_DMA_DISABLE_IT` read-modify-write işlemi aktif stream EN/IRQ bitlerini eski değerle geri yazabilir. HAL çağrısı dönmeden olası HT oluşması güvenli olmalı; TX half callback task bildirimi üretmesin. Amaç gereksiz yarım-gönderim kesme yükünü azaltmak.
+- [x] HAL_OK, HAL_BUSY ve HAL_ERROR'u ayrı kaydet. Hata halinde güvenli duruş biliniyorsa IDLE; belirsizse bu adımda konservatif FAULT ile tamponu kilitle. Otomatik ABORTING geçişi T3'te eklenecek; T2 henüz yazılmamış abort fonksiyonuna bağımlı kalmayacak. Üst katman başarısız dönüşte çerçeveyi kendi isteği olmadan tekrar göndermez.
+- [x] `TX_COMPLETE_BEFORE_HAL_RETURN`, `TX_HAL_START_BUSY`, `TX_HAL_START_ERROR` testlerini çalıştır. Tampon aktifken değiştirilmesin; HAL başlangıç hatası başarı sayılmasın.
 
 **Geçiş koşulu:** Her dönüşün anlamı açık; aktif veya belirsiz DMA tamponunun üzerine yazılamıyor.
 
@@ -559,16 +572,16 @@ Uyku öncesi son kontrolden sonra gelen ISR veya üretici isteği notification'd
 **Dosyalar:** `uart_tx.c/.h`, test dosyaları.  
 **Arayüz:** Mevcut `void uart_tx_service(void)`; yeni `uint32_t uart_tx_next_wait_ms(uint32_t now)` ve `bool uart_tx_take_result(uart_tx_result_t *out)`. T3'te tanımlanacak `uart_tx_result_t`: code alanı için `UART_TX_RESULT_COMPLETE`, `UART_TX_RESULT_START_BUSY`, `UART_TX_RESULT_START_ERROR`, `UART_TX_RESULT_DMA_ERROR`, `UART_TX_RESULT_TIMEOUT` değerli enum; ayrıca `uint32_t hal_error` ve `bool recovery_fault`. TX sonucu F2'de ortak sonuç tipine eşlenecek.
 
-- [ ] `TX_NO_COMPLETION_TIMEOUT`: 20 ms içinde tamamlanmayan aktarım ABORTING'e geçsin; `TX_DMA_ERROR_ABORT`: hata beklemeden abort başlatsın.
-- [ ] `HAL_UART_AbortTransmit_IT()` yalnız bir kez çağrılsın. State/abort_tick çağrıdan önce hazır olsun; RX abort veya genel `HAL_UART_Abort()` çağrılmasın.
-- [ ] T2'de belirsiz başlangıç hatası için kullanılan konservatif FAULT kapanışını bu adımda aynı ABORTING akışına bağla; güvenli duruş sonrası başlangıç hata sonucu korunarak IDLE'a dönülsün.
-- [ ] Bölüm 6.4 duruş koşullarını callback gelse de gelmese de değerlendir. Koşullar sağlanırsa IDLE'a dön; başarısız çerçeve sayacını bir kez artır, frames_sent artırma.
-- [ ] 20 ms abort sınırında duruş doğrulanamazsa FAULT. `TX_ABORT_SYNC_CALLBACK`, `TX_ABORT_CALLBACK_WITH_EN_SET`, `TX_ABORT_NO_CALLBACK_SAFE_HW` testlerini çalıştır.
-- [ ] `TX_LATE_DONE_IN_ABORT`, `TX_LATE_DONE_IN_FAULT`: durum ve başarı sayacı değişmesin. `TX_REUSE_AFTER_ABORT`: güvenli duruş sonrası init gerektirmeden yeni gönderim kabul edilsin; eski event erken bitirmesin.
-- [ ] Tamamlanma service gecikmesinden önce oluşmuşsa geçerli done önce işlensin; yalnız wall time 20 ms geçti diye başarılı aktarım düşürülmesin. DMAError ile birlikteyse başarısız say.
-- [ ] `TX_DONE_DURING_TIMEOUT_DECISION`: timeout kararı kurulmadan gelen done son olay kontrolünde görülsün; state geçişiyle tutarlı işlensin. Callback aynı anda geldi diye sonuç iki kez verilmesin.
-- [ ] HAL'e gerçekten sunulmuş her deneme için sonuç tek öğelik modül sonuç kutusuna yazılsın; başlangıç HAL_BUSY/HAL_ERROR da buna dahil. Başlatma öncesi INVALID/BUSY/NOT_READY reddi sonuç üretmez. `take_result(NULL)` false; geçerli out ile sonuç varsa kopyalayıp tüketir. Sonuç alınmadan yeni deneme BUSY döner; eski sonuç ezilmez. T3 ile beraber mevcut test/ana döngü tüketicilerini sonuç kutusunu boşaltacak şekilde güncelle; F2 bunu callback'e dönüştürecek.
-- [ ] UINT32 tick sarımı, FAULT recovery ve aktif TX sırasında RX tüketiminin devamını sınat.
+- [x] `TX_NO_COMPLETION_TIMEOUT`: 20 ms içinde tamamlanmayan aktarım ABORTING'e geçsin; `TX_DMA_ERROR_ABORT`: hata beklemeden abort başlatsın.
+- [x] `HAL_UART_AbortTransmit_IT()` yalnız bir kez çağrılsın. State/abort_tick çağrıdan önce hazır olsun; RX abort veya genel `HAL_UART_Abort()` çağrılmasın.
+- [x] T2'de belirsiz başlangıç hatası için kullanılan konservatif FAULT kapanışını bu adımda aynı ABORTING akışına bağla; güvenli duruş sonrası başlangıç hata sonucu korunarak IDLE'a dönülsün.
+- [x] Bölüm 6.4 duruş koşullarını callback gelse de gelmese de değerlendir. Koşullar sağlanırsa IDLE'a dön; başarısız çerçeve sayacını bir kez artır, frames_sent artırma.
+- [x] 20 ms abort sınırında duruş doğrulanamazsa FAULT. `TX_ABORT_SYNC_CALLBACK`, `TX_ABORT_CALLBACK_WITH_EN_SET`, `TX_ABORT_NO_CALLBACK_SAFE_HW` testlerini çalıştır.
+- [x] `TX_LATE_DONE_IN_ABORT`, `TX_LATE_DONE_IN_FAULT`: durum ve başarı sayacı değişmesin. `TX_REUSE_AFTER_ABORT`: güvenli duruş sonrası init gerektirmeden yeni gönderim kabul edilsin; eski event erken bitirmesin.
+- [x] Tamamlanma service gecikmesinden önce oluşmuşsa geçerli done önce işlensin; yalnız wall time 20 ms geçti diye başarılı aktarım düşürülmesin. DMAError ile birlikteyse başarısız say.
+- [x] `TX_DONE_DURING_TIMEOUT_DECISION`: timeout kararı kurulmadan gelen done son olay kontrolünde görülsün; state geçişiyle tutarlı işlensin. Callback aynı anda geldi diye sonuç iki kez verilmesin.
+- [x] HAL'e gerçekten sunulmuş her deneme için sonuç tek öğelik modül sonuç kutusuna yazılsın; başlangıç HAL_BUSY/HAL_ERROR da buna dahil. Başlatma öncesi INVALID/BUSY/NOT_READY reddi sonuç üretmez. `take_result(NULL)` false; geçerli out ile sonuç varsa kopyalayıp tüketir. Sonuç alınmadan yeni deneme BUSY döner; eski sonuç ezilmez. T3 ile beraber mevcut test/ana döngü tüketicilerini sonuç kutusunu boşaltacak şekilde güncelle; F2 bunu callback'e dönüştürecek.
+- [x] UINT32 tick sarımı, FAULT recovery ve aktif TX sırasında RX tüketiminin devamını sınat.
 
 **Geçiş koşulu:** TX süresiz BUSY kalmıyor; aktarım başarısızlığı ve modülün yeniden hazır olması ayrı; güvenli duruş yoksa tampon kilitli.
 
@@ -577,12 +590,12 @@ Uyku öncesi son kontrolden sonra gelen ISR veya üretici isteği notification'd
 **Bağımlılık:** T3.  
 **Dosyalar:** `tests.c/.h`, `uart_comm_tests.c/.h`, `main.c` USER CODE.
 
-- [ ] 40 × 13 = 520 bayt sarım senaryosunu TX DMA ile çalıştır. Her çerçeve normal servis/tamamlanma zincirinden geçsin.
-- [ ] Tek, birleşik, parçalı, 64 baytlık ve sequence sarımlı çerçeveleri RX/TX eşzamanlı doğrula.
-- [ ] Aktif TX sırasında gerçek RX FE/ORE; RX sürerken kontrollü TX DMA hatası; iki yön sürerken ortak DMA hata yolunu ayrı ayrı sınat.
-- [ ] Her helper hem RX hem TX service çalıştırsın; yalnız RX servis eden bekleme helper'ları aktif TX'in tamamlanmasını geciktirmesin.
-- [ ] HAL'e doğrudan blocking gönderim kullanan eski testler yalnız izole bare-metal test düzeninde çalışsın. RTOS üretim döngüsüne taşınmasın.
-- [ ] Tam rebuild, callback sembol kontrolü, buffer SRAM adresleri ve sonuç muhasebesini doğrula.
+- [x] 40 × 13 = 520 bayt sarım senaryosunu TX DMA ile çalıştır. Her çerçeve normal servis/tamamlanma zincirinden geçsin.
+- [x] Tek, birleşik, parçalı, 64 baytlık ve sequence sarımlı çerçeveleri RX/TX eşzamanlı doğrula.
+- [x] Aktif TX sırasında gerçek RX FE/ORE; RX sürerken kontrollü TX DMA hatası; iki yön sürerken ortak DMA hata yolunu ayrı ayrı sınat.
+- [x] Her helper hem RX hem TX service çalıştırsın; yalnız RX servis eden bekleme helper'ları aktif TX'in tamamlanmasını geciktirmesin.
+- [x] HAL'e doğrudan blocking gönderim kullanan eski testler yalnız izole bare-metal test düzeninde çalışsın. RTOS üretim döngüsüne taşınmasın.
+- [x] Tam rebuild, callback sembol kontrolü, buffer SRAM adresleri ve sonuç muhasebesini doğrula.
 
 **TX geçiş kapısı:** T1–T4 sonuçları tamam; RX/TX hata toparlaması birbiriyle çakışmıyor. RTOS geçişi bundan sonra başlar.
 
@@ -593,13 +606,13 @@ Uyku öncesi son kontrolden sonra gelen ISR veya üretici isteği notification'd
 **Bağımlılık:** T4.  
 **Dosyalar:** Hedef `.ioc`, `FreeRTOSConfig.h`, üretilen RTOS/IRQ/timebase dosyaları ve USER CODE alanları.
 
-- [ ] Hedef projenin yolu, kullanılan HAL sürümü, FreeRTOS portu ve native/CMSIS API seçimi kaydedilsin. F0 tamamlanmadan bu dosyaların var olduğu varsayılmasın.
-- [ ] CubeMX'te mevcut USART2/pin/DMA atamalarını koru. NVIC gruplaması GROUP_4; USART2, DMA1_Stream5 ve DMA1_Stream6 aynı, RTOS API'ye uygun preemption önceliğinde olsun.
-- [ ] Örnek olarak `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY=5` ise üçünü 5 seç; sayı doğrudan kopyalanmadan gerçek `configPRIO_BITS` ve shifted `configMAX_SYSCALL_INTERRUPT_PRIORITY` ile doğrula. Mevcut 0 önceliğinde FromISR çağrısı etkinleştirme.
-- [ ] SysTick/SVC/PendSV tek tanımlı olsun. HAL tick kaynağı ve FreeRTOS tick sahibi açıkça belirlensin. HAL timebase için gerekiyorsa boş timer CubeMX'te seçilip açıklansın; kullanılan timer'a sessizce el koyma.
-- [ ] Task notification, statik allocation, `INCLUDE_vTaskSuspend` ve assert seçeneklerini doğrula. Taskın başka kütüphanece kullanılan notification alanını paylaşmadığından emin ol.
-- [ ] Ek UART timer/taskı üretme. UartCommTask'ı hem CubeMX hem elle ikinci kez oluşturma; native referansta oluşturucu uart_comm_init olacak.
-- [ ] Task önceliğini hedef uygulamanın tasklarıyla birlikte belirle. İzole doğrulamada başlangıç `tskIDLE_PRIORITY+2` olabilir; gerçek yükte en fazla 5 ms RX hizmet gecikmesi test edilmeden kalıcı kabul edilmez.
+- [x] Hedef projenin yolu, kullanılan HAL sürümü, FreeRTOS portu ve native/CMSIS API seçimi kaydedilsin. F0 tamamlanmadan bu dosyaların var olduğu varsayılmasın.
+- [x] CubeMX'te mevcut USART2/pin/DMA atamalarını koru. NVIC gruplaması GROUP_4; USART2, DMA1_Stream5 ve DMA1_Stream6 aynı, RTOS API'ye uygun preemption önceliğinde olsun.
+- [x] Örnek olarak `configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY=5` ise üçünü 5 seç; sayı doğrudan kopyalanmadan gerçek `configPRIO_BITS` ve shifted `configMAX_SYSCALL_INTERRUPT_PRIORITY` ile doğrula. Mevcut 0 önceliğinde FromISR çağrısı etkinleştirme.
+- [x] SysTick/SVC/PendSV tek tanımlı olsun. HAL tick kaynağı ve FreeRTOS tick sahibi açıkça belirlensin. HAL timebase için gerekiyorsa boş timer CubeMX'te seçilip açıklansın; kullanılan timer'a sessizce el koyma.
+- [x] Task notification, statik allocation, `INCLUDE_vTaskSuspend` ve assert seçeneklerini doğrula. Taskın başka kütüphanece kullanılan notification alanını paylaşmadığından emin ol.
+- [x] Ek UART timer/taskı üretme. UartCommTask'ı hem CubeMX hem elle ikinci kez oluşturma; native referansta oluşturucu uart_comm_init olacak.
+- [x] Task önceliğini hedef uygulamanın tasklarıyla birlikte belirle. İzole doğrulamada başlangıç `tskIDLE_PRIORITY+2` olabilir; gerçek yükte en fazla 5 ms RX hizmet gecikmesi test edilmeden kalıcı kabul edilmez.
 
 Kesme önceliği kuralları [FreeRTOS Cortex-M3/M4 açıklamasıyla](https://freertos.org/Documentation/02-Kernel/03-Supported-devices/04-Demos/ARM-Cortex/RTOS-Cortex-M3-M4) doğrulanır. Bu adım `FromISR` kodunun etkinleştirilmesinden **önce** tamamlanır.
 
@@ -612,14 +625,14 @@ Kesme önceliği kuralları [FreeRTOS Cortex-M3/M4 açıklamasıyla](https://fre
 **Değişen:** `uart_rx.c/.h`, `uart_tx.c/.h`, `main.c` USER CODE, IRQ USER CODE.  
 **Arayüz:** Bölüm 5.2 init; `static void UartCommTask(void *argument)`; iç `comm_notify(uint32_t events)` ve `comm_service_once(uint32_t now)`.
 
-- [ ] Init statik task kaynağını kursun; return değeri kontrol edilsin. Queue ve send_copy F2'de eklenecek; F1'de henüz kullanılmaz. 512 StackType_t başlangıç stack'i kullan; CMSIS'e çevrilirse stack biriminin bayt olduğunu varsaymadan arayüzü kontrol et. F1 TX testlerini yalnız owner task içinde kontrollü test adımıyla mevcut TX arayüzünden başlat.
-- [ ] F1'deki owner test akışı T3 take_result kutusunu da tüketip sonucu kaydetsin; sadece tx_service çağrısı yapıp alınmamış sonuç nedeniyle ikinci gönderimi BUSY bırakmasın. F2 bu aynı tüketimi tag'li public callback'e bağlayacak.
-- [ ] RX/TX/error/abort HAL callback'lerini tek seferde uart_comm.c'ye taşı; eski tanımları aynı adımda kaldır. Şimdilik mevcut modül bildirim kapılarını çağırabilirler.
-- [ ] Bu taşımada eksik iki kapıyı aynı adımda tanımla: `void uart_rx_on_event(UART_HandleTypeDef *huart, uint16_t size, HAL_UART_RxEventTypeTypeDef type)` ve `void uart_tx_on_complete(UART_HandleTypeDef *huart)`. Ortak RX callback type'ı hemen okur ve kapıya değer olarak verir. RX tur sayacı/istatistiği kapıda güncellenir; sonra comm_notify çağrılır. Error/abort için R4/T1 kapıları kullanılır. Her ham olay modüle yalnız bir kez verilir; notification dönüşündeki bitlerle ikinci kez enjekte edilmez.
-- [ ] `comm_notify` gerçek ISR'de FromISR, thread bağlamında normal notify kullansın. Task handle hazır değilse RTOS çağrısı yapmasın; olay kaydı korunmalı. DMA task başlayana kadar açılmasın.
-- [ ] Ortak servis turunu bölüm 7'ye göre kur. R5/T3 deadline hesaplarını kullan; aktif süre sınırı yoksa süresiz bekle. Bare-metal main service çağrılarını RTOS seçeneğinde kaldır.
-- [ ] `TASK_EVENT_BEFORE_SLEEP`, `TASK_EVENT_DURING_SERVICE`, `TASK_RX_TX_ERROR_TOGETHER`, `TASK_SYNC_ABORT_CALLBACK` testlerini ekle.
-- [ ] Tek owner'ı doğrula: başka task aynı huart üzerinde HAL start/abort/transmit çağırmıyor; kısa handler service'e tekrar girmiyor.
+- [x] Init statik task kaynağını kursun; return değeri kontrol edilsin. Queue ve send_copy F2'de eklenecek; F1'de henüz kullanılmaz. 512 StackType_t başlangıç stack'i kullan; CMSIS'e çevrilirse stack biriminin bayt olduğunu varsaymadan arayüzü kontrol et. F1 TX testlerini yalnız owner task içinde kontrollü test adımıyla mevcut TX arayüzünden başlat.
+- [x] F1'deki owner test akışı T3 take_result kutusunu da tüketip sonucu kaydetsin; sadece tx_service çağrısı yapıp alınmamış sonuç nedeniyle ikinci gönderimi BUSY bırakmasın. F2 bu aynı tüketimi tag'li public callback'e bağlayacak.
+- [x] RX/TX/error/abort HAL callback'lerini tek seferde uart_comm.c'ye taşı; eski tanımları aynı adımda kaldır. Şimdilik mevcut modül bildirim kapılarını çağırabilirler.
+- [x] Bu taşımada eksik iki kapıyı aynı adımda tanımla: `void uart_rx_on_event(UART_HandleTypeDef *huart, uint16_t size, HAL_UART_RxEventTypeTypeDef type)` ve `void uart_tx_on_complete(UART_HandleTypeDef *huart)`. Ortak RX callback type'ı hemen okur ve kapıya değer olarak verir. RX tur sayacı/istatistiği kapıda güncellenir; sonra comm_notify çağrılır. Error/abort için R4/T1 kapıları kullanılır. Her ham olay modüle yalnız bir kez verilir; notification dönüşündeki bitlerle ikinci kez enjekte edilmez.
+- [x] `comm_notify` gerçek ISR'de FromISR, thread bağlamında normal notify kullansın. Task handle hazır değilse RTOS çağrısı yapmasın; olay kaydı korunmalı. DMA task başlayana kadar açılmasın.
+- [x] Ortak servis turunu bölüm 7'ye göre kur. R5/T3 deadline hesaplarını kullan; aktif süre sınırı yoksa süresiz bekle. Bare-metal main service çağrılarını RTOS seçeneğinde kaldır.
+- [x] `TASK_EVENT_BEFORE_SLEEP`, `TASK_EVENT_DURING_SERVICE`, `TASK_RX_TX_ERROR_TOGETHER`, `TASK_SYNC_ABORT_CALLBACK` testlerini ekle.
+- [x] Tek owner'ı doğrula: başka task aynı huart üzerinde HAL start/abort/transmit çağırmıyor; kısa handler service'e tekrar girmiyor.
 
 **Geçiş koşulu:** Tek UART taskı uyuyup olayla uyanıyor; senkron callback de güvenli; yeni olay uyku geçişinde kaybolmuyor.
 
@@ -638,15 +651,15 @@ typedef struct {
 } uart_comm_tx_item_t;
 ```
 
-- [ ] `uart_comm_init` içine task oluşturulmadan önce `xQueueCreateStatic(8, sizeof(uart_comm_tx_item_t), ...)` ile FIFO kurulumunu ekle. Storage boyutunu `8 * sizeof(...)` hesapla; padding'i göz ardı etme. Kuyrukta kullanıcı tamponunun işaretçisi bulunmasın. F1 taskı ikinci kez oluşturulmasın.
-- [ ] Bölüm 6.5 sırasıyla gate/epoch snapshot'ı al; local item'ı sıfırlayıp alanlarını/kullanılan baytlarını doldur. `xQueueSendToBack(..., 0)` **kritik bölüm dışında** olsun. Yalnız başarıda TX_REQUEST bildir. Kaynak tamponu API dönüşünde serbesttir; kullanılmayan baytlar/padding nedeniyle rastgele stack içeriği kuyruğa taşınmasın.
-- [ ] Owner FAULT'a geçerken kısa koruma altında gate'i kapatıp admission_epoch'u artırır. Queue API/notify bu koruma altında çağrılmaz. Normal dequeue ve FAULT boşaltmasında öğenin epoch'unu kontrol et; eski dönem öğesi recovery sonrası gelse de CANCELLED_FAULT alsın.
-- [ ] Owner bir öğeyi kuyruktan aktif kayda alır; HAL dönüşü başarısız olsa bile kimlik/veri/sonuç kaydı korunur. SENDING/ABORTING sırasında ikinci öğe aktif tampona alınmaz.
-- [ ] Başarı veya hata sonucu yalnız bir kez üret; abort gerekli ise güvenli çözülme/FAULT sonrası sonucu kesinleştir. Abort failure orijinal DMA/timeout nedenini silmesin, `recovery_fault` ile ayrı bildirilsin.
-- [ ] T3'ün take_result arayüzünü her tur, yeni öğe almadan önce tüket. Sonuca aktif öğenin tag'ini ekleyip callback'i çağır; callback sırasında yeniden send_copy mümkün olduğundan eski active_valid/result sahipliğini callback'ten önce kapat. INVALID/BUSY/NOT_READY gibi HAL'e hiç girilmemiş beklenmedik alt-modül reddinde sonuç kutusunu sonsuza kadar bekleme: kabul edilmiş aktif öğeyi START_ERROR ile bir kez sonuçlandır, durum tutarsızsa TX kabulünü FAULT politikasıyla kapat.
-- [ ] TX FAULT'ta kabulü kapat; her servis turunda en fazla bir bekleyen öğeyi CANCELLED_FAULT ile çıkar. Kuyruk boşaltılırken RX servis almaya devam etsin. Recovery kabulü ancak iptaller tamamlandıktan ve duruş doğrulandıktan sonra açsın.
-- [ ] `QUEUE_EIGHT_PLUS_ACTIVE`, `QUEUE_FULL_NO_OVERWRITE`, `QUEUE_MULTI_PRODUCER_ORDER`, `QUEUE_WAKE_AFTER_TX_DONE`, `QUEUE_ACCEPT_FAULT_RACE`, `QUEUE_ONE_RESULT_PER_ACCEPT` testlerini çalıştır. Çok üreticili FIFO sırası başarılı enqueue sırasıdır; API çağrısına giriş sırası değildir.
-- [ ] `QUEUE_ENQUEUE_AFTER_FAULT_DRAIN` ve `QUEUE_ENQUEUE_AFTER_RECOVERY`: üreticiyi gate snapshot'ından sonra beklet, owner'a FAULT/boşaltma ve gerekirse recovery yaptır, sonra enqueue'ya devam ettir. Eski epoch hiçbir durumda hatta gönderilmesin; bir kez CANCELLED_FAULT gelsin. `QUEUE_RESULT_BEFORE_SEND_RETURN`: hızlı owner sonucu üretici API dönmeden teslim edebilse de uygulamanın önceden hazırladığı tag kaydı geçerli kalsın.
+- [x] `uart_comm_init` içine task oluşturulmadan önce `xQueueCreateStatic(8, sizeof(uart_comm_tx_item_t), ...)` ile FIFO kurulumunu ekle. Storage boyutunu `8 * sizeof(...)` hesapla; padding'i göz ardı etme. Kuyrukta kullanıcı tamponunun işaretçisi bulunmasın. F1 taskı ikinci kez oluşturulmasın.
+- [x] Bölüm 6.5 sırasıyla gate/epoch snapshot'ı al; local item'ı sıfırlayıp alanlarını/kullanılan baytlarını doldur. `xQueueSendToBack(..., 0)` **kritik bölüm dışında** olsun. Yalnız başarıda TX_REQUEST bildir. Kaynak tamponu API dönüşünde serbesttir; kullanılmayan baytlar/padding nedeniyle rastgele stack içeriği kuyruğa taşınmasın.
+- [x] Owner FAULT'a geçerken kısa koruma altında gate'i kapatıp admission_epoch'u artırır. Queue API/notify bu koruma altında çağrılmaz. Normal dequeue ve FAULT boşaltmasında öğenin epoch'unu kontrol et; eski dönem öğesi recovery sonrası gelse de CANCELLED_FAULT alsın.
+- [x] Owner bir öğeyi kuyruktan aktif kayda alır; HAL dönüşü başarısız olsa bile kimlik/veri/sonuç kaydı korunur. SENDING/ABORTING sırasında ikinci öğe aktif tampona alınmaz.
+- [x] Başarı veya hata sonucu yalnız bir kez üret; abort gerekli ise güvenli çözülme/FAULT sonrası sonucu kesinleştir. Abort failure orijinal DMA/timeout nedenini silmesin, `recovery_fault` ile ayrı bildirilsin.
+- [x] T3'ün take_result arayüzünü her tur, yeni öğe almadan önce tüket. Sonuca aktif öğenin tag'ini ekleyip callback'i çağır; callback sırasında yeniden send_copy mümkün olduğundan eski active_valid/result sahipliğini callback'ten önce kapat. INVALID/BUSY/NOT_READY gibi HAL'e hiç girilmemiş beklenmedik alt-modül reddinde sonuç kutusunu sonsuza kadar bekleme: kabul edilmiş aktif öğeyi START_ERROR ile bir kez sonuçlandır, durum tutarsızsa TX kabulünü FAULT politikasıyla kapat.
+- [x] TX FAULT'ta kabulü kapat; her servis turunda en fazla bir bekleyen öğeyi CANCELLED_FAULT ile çıkar. Kuyruk boşaltılırken RX servis almaya devam etsin. Recovery kabulü ancak iptaller tamamlandıktan ve duruş doğrulandıktan sonra açsın.
+- [x] `QUEUE_EIGHT_PLUS_ACTIVE`, `QUEUE_FULL_NO_OVERWRITE`, `QUEUE_MULTI_PRODUCER_ORDER`, `QUEUE_WAKE_AFTER_TX_DONE`, `QUEUE_ACCEPT_FAULT_RACE`, `QUEUE_ONE_RESULT_PER_ACCEPT` testlerini çalıştır. Çok üreticili FIFO sırası başarılı enqueue sırasıdır; API çağrısına giriş sırası değildir.
+- [x] `QUEUE_ENQUEUE_AFTER_FAULT_DRAIN` ve `QUEUE_ENQUEUE_AFTER_RECOVERY`: üreticiyi gate snapshot'ından sonra beklet, owner'a FAULT/boşaltma ve gerekirse recovery yaptır, sonra enqueue'ya devam ettir. Eski epoch hiçbir durumda hatta gönderilmesin; bir kez CANCELLED_FAULT gelsin. `QUEUE_RESULT_BEFORE_SEND_RETURN`: hızlı owner sonucu üretici API dönmeden teslim edebilse de uygulamanın önceden hazırladığı tag kaydı geçerli kalsın.
 
 Statik bellek seçimi task ve kuyruk yaşam süresini sabit tutar; kuyruk öğeleri değer olarak kopyalanır. [FreeRTOS statik allocation yaklaşımı](https://www.freertos.org/Documentation/02-Kernel/02-Kernel-features/09-Memory-management/03-Static-vs-Dynamic-memory-allocation) esas alınır.
 
@@ -658,14 +671,14 @@ Statik bellek seçimi task ve kuyruk yaşam süresini sabit tutar; kuyruk öğel
 **Dosyalar:** `uart_comm.c/.h`, uygulama handler dosyası, test dosyaları.  
 **Arayüz:** Bölüm 5.2 `uart_comm_get_snapshot` ve handler sözleşmesi tamamlanır.
 
-- [ ] Owner servis sonunda public snapshot'ı kısa kritik bölümde yayımlasın; getter aynı korumayla kopyalasın. Sadece okuyucuyu kilitleyip çok alanlı yazar güncellemesini korumasız bırakma.
-- [ ] Bölüm 5.2'deki snapshot tipini eksiksiz tanımla; R/T sayaçlarını bölüm 5.5'in alanlarına eşle. Init öncesi snapshot initialized=false; yalnız RX FAULT'ta rx_ready=false ve sağlıklı TX için tx_accepting=true gösterilebilsin.
-- [ ] RX handler payload'ı gerekiyorsa uygulama belleğine kopyalasın. Handler HAL çağırmasın ve TX tamamlanmasını beklemesin.
-- [ ] Komut yanıtının ilk örneğini `FRAME_TYPE_RESPONSE`, mevcut SEQ/TYPE/sonuç formatıyla kur; aynı FIFO'ya koy. Kuyruk doluysa sonucu kontrol edip yanıt düşmesini say; başarı raporlama.
-- [ ] Yanıtı zorunlu ve yan etkili gerçek cihaz komutlarını, yanıt alanı rezervasyonu/komut kabul politikası tasarlanmadan etkinleştirme. İlk test yan etkisiz komut/yanıtla yapılır. Bu sınır ACK/tekrar tasarımının yerine geçmez.
-- [ ] `TASK_IDLE_NO_POLL` ölçümü: 10 saniye boşta UART taskında süreli uyanma olmasın. `TASK_PARTIAL_FRAME_DEADLINE`: sessizlikte doğru anda timeout işlensin ve parser boşalınca süresiz uykuya dönülsün.
-- [ ] `TASK_STALE_DEADLINE_NO_SPIN`: RX FAULT/ABORTING durumunda dolmuş eski frame deadline, RUNNING+ertelenmiş producer örneği ve TX IDLE'da eski TX deadline beklemeyi 0'a sabitlemesin. `TASK_WAIT_USES_FRESH_TIME`: handler sonrasında kalan süre güncel zamandan hesaplansın.
-- [ ] 100 Hz RX+TX ve sürekli tam çift yön testini çalıştır; CPU, stack high-water mark, en uzun ISR/task gecikmesi, queue yüksek su seviyesi ve kayıpları kaydet. Stack için başlangıçta en az %25 kullanılmamış pay hedefle; en ağır hata/handler yolu test edilmeden azaltma.
+- [x] Owner servis sonunda public snapshot'ı kısa kritik bölümde yayımlasın; getter aynı korumayla kopyalasın. Sadece okuyucuyu kilitleyip çok alanlı yazar güncellemesini korumasız bırakma.
+- [x] Bölüm 5.2'deki snapshot tipini eksiksiz tanımla; R/T sayaçlarını bölüm 5.5'in alanlarına eşle. Init öncesi snapshot initialized=false; yalnız RX FAULT'ta rx_ready=false ve sağlıklı TX için tx_accepting=true gösterilebilsin.
+- [x] RX handler payload'ı gerekiyorsa uygulama belleğine kopyalasın. Handler HAL çağırmasın ve TX tamamlanmasını beklemesin.
+- [x] Komut yanıtının ilk örneğini `FRAME_TYPE_RESPONSE`, mevcut SEQ/TYPE/sonuç formatıyla kur; aynı FIFO'ya koy. Kuyruk doluysa sonucu kontrol edip yanıt düşmesini say; başarı raporlama.
+- [x] Yanıtı zorunlu ve yan etkili gerçek cihaz komutlarını, yanıt alanı rezervasyonu/komut kabul politikası tasarlanmadan etkinleştirme. İlk test yan etkisiz komut/yanıtla yapılır. Bu sınır ACK/tekrar tasarımının yerine geçmez.
+- [x] `TASK_IDLE_NO_POLL` ölçümü: 10 saniye boşta UART taskında süreli uyanma olmasın. `TASK_PARTIAL_FRAME_DEADLINE`: sessizlikte doğru anda timeout işlensin ve parser boşalınca süresiz uykuya dönülsün.
+- [x] `TASK_STALE_DEADLINE_NO_SPIN`: RX FAULT/ABORTING durumunda dolmuş eski frame deadline, RUNNING+ertelenmiş producer örneği ve TX IDLE'da eski TX deadline beklemeyi 0'a sabitlemesin. `TASK_WAIT_USES_FRESH_TIME`: handler sonrasında kalan süre güncel zamandan hesaplansın.
+- [x] 100 Hz RX+TX ve sürekli tam çift yön testini çalıştır; CPU, stack high-water mark, en uzun ISR/task gecikmesi, queue yüksek su seviyesi ve kayıpları kaydet. Stack için başlangıçta en az %25 kullanılmamış pay hedefle; en ağır hata/handler yolu test edilmeden azaltma.
 
 **Geçiş koşulu:** İşlevsel ve performans sonuçları aynı firmware için kayıtlı; hedef CPU/gecikme bütçesi sağlanıyor veya engel açıkça ölçülmüş.
 
@@ -676,15 +689,15 @@ Statik bellek seçimi task ve kuyruk yaşam süresini sabit tutar; kuyruk öğel
 **Bağımlılık:** F3.  
 **Dosyalar:** `uart_comm.c/.h`, test dosyaları, `stm32f4xx_it.c` USER CODE ve IDE kaynak listesi. Eski `uart_rx.c/.h`, `uart_tx.c/.h` bu adımın sonunda kaldırılır.
 
-- [ ] Taşımadan önce R/T/F test sonuçlarını kaydet. Bu adımda yeni davranış/optimizasyon ekleme; önce yalnız sahipliği tek dosyada topla.
-- [ ] RX state, DMA buffer, üretici sayacı ve yardımcılarını uart_comm.c'deki RX bölümüne; TX state, aktif buffer ve yardımcılarını TX bölümüne taşı. Çakışan `s_huart`, `s_state`, `s_buf`, `s_len` adlarını tek context ve açık `rx_`/`tx_` alanlarıyla çöz.
-- [ ] İç servisleri `static rx_service_budget`, `static tx_service`, `static rx_sample_producer`, `static rx_next_wait_ms`, `static tx_next_wait_ms` yap. Ortak HAL handle tek yerde kalsın.
-- [ ] F1'deki on_event/on_complete geçici kapılarını ve T3 sonuç kutusunu da aynı context içine taşı. Yerel TX sonuç kodları ortak sonuç tipine eşlenebilir; kodları/sayaçları ikinci kez üretme. Statik buffer sayısı ve queue'nun 8+1 sahiplik sınırı korunmalı.
-- [ ] RX sağlık kancasını `void uart_comm_on_uart_irq_exit(void)` olarak değiştir. Sadece UART IRQ bağlantısı için public tut; uygulama API'sinden ayrı yorumla belirt. TC tur sayımı RX callback'inde kalır; yeni DMA IRQ giriş kancası eklenmez.
-- [ ] Uygulama/test include'larını uart_comm.h'ye geçir. R/T davranış testleri için gerekirse `UART_COMM_TEST` altında özel test arayüzü bırak; eski public RX/TX API'lerini kalıcı wrapper olarak yaşatma.
-- [ ] Eski dört dosyayı build'den ve kaynak ağacından çıkar. CubeIDE kaynak listesini yeniden üretsin; eski `.o` dosyaları linkte sonucu gizlemesin diye clean rebuild yap.
-- [ ] Kod ağacında eski include ve çağrı kalmadığını ara. Callback sembollerinin her biri tek tanım; DMA buffer'larının SRAM konumu ve yalnız bir UartCommTask olduğuna bak.
-- [ ] R/T/F testlerini yeniden çalıştır; davranış/sayaç sonuçlarını taşımadan önceki firmware ile karşılaştır.
+- [x] Taşımadan önce R/T/F test sonuçlarını kaydet. Bu adımda yeni davranış/optimizasyon ekleme; önce yalnız sahipliği tek dosyada topla.
+- [x] RX state, DMA buffer, üretici sayacı ve yardımcılarını uart_comm.c'deki RX bölümüne; TX state, aktif buffer ve yardımcılarını TX bölümüne taşı. Çakışan `s_huart`, `s_state`, `s_buf`, `s_len` adlarını tek context ve açık `rx_`/`tx_` alanlarıyla çöz.
+- [x] İç servisleri `static rx_service_budget`, `static tx_service`, `static rx_sample_producer`, `static rx_next_wait_ms`, `static tx_next_wait_ms` yap. Ortak HAL handle tek yerde kalsın.
+- [x] F1'deki on_event/on_complete geçici kapılarını ve T3 sonuç kutusunu da aynı context içine taşı. Yerel TX sonuç kodları ortak sonuç tipine eşlenebilir; kodları/sayaçları ikinci kez üretme. Statik buffer sayısı ve queue'nun 8+1 sahiplik sınırı korunmalı.
+- [x] RX sağlık kancasını `void uart_comm_on_uart_irq_exit(void)` olarak değiştir. Sadece UART IRQ bağlantısı için public tut; uygulama API'sinden ayrı yorumla belirt. TC tur sayımı RX callback'inde kalır; yeni DMA IRQ giriş kancası eklenmez.
+- [x] Uygulama/test include'larını uart_comm.h'ye geçir. R/T davranış testleri için gerekirse `UART_COMM_TEST` altında özel test arayüzü bırak; eski public RX/TX API'lerini kalıcı wrapper olarak yaşatma.
+- [x] Eski dört dosyayı build'den ve kaynak ağacından çıkar. CubeIDE kaynak listesini yeniden üretsin; eski `.o` dosyaları linkte sonucu gizlemesin diye clean rebuild yap.
+- [x] Kod ağacında eski include ve çağrı kalmadığını ara. Callback sembollerinin her biri tek tanım; DMA buffer'larının SRAM konumu ve yalnız bir UartCommTask olduğuna bak.
+- [x] R/T/F testlerini yeniden çalıştır; davranış/sayaç sonuçlarını taşımadan önceki firmware ile karşılaştır.
 
 **Nihai dosya düzeni:**
 
@@ -705,12 +718,12 @@ Tek dosya içinde önerilen bölüm sırası: sabitler/tipler → context ve buf
 
 ### M2 — Son kabul ve gerçek ölçüm kaydı
 
-- [ ] CubeIDE Debug ve üretim/test kancaları kapalı yapılandırmayı tam derle ve bağla; yeni derleyici uyarısı/callback çakışması yok.
-- [ ] Normal çift yön, parçalı çerçeve, sarım, taşma, başlangıç BUSY/ERROR, UART/DMA hata, kayıp/geç/senkron callback, queue dolu ve iki üreticili testler geçsin.
-- [ ] Task/IRQ sahipliği, kritik bölüm süreleri ve “bildirim gelirken uykuya geçiş” tekrar incelensin.
-- [ ] `Core/Src` üretim yollarında blocking transmit/receive, `HAL_Delay`, bloklayan abort beklemesi ve service busy-wait kalmadığını kontrol et. Deadline ile uyanıp bir kez yapılan durum kontrolü bu yasağın kapsamında değildir. HAL'in kendi ISR içindeki sınırlı işlemleri ayrıca ölç; uygulama callback'leriyle karıştırma.
-- [ ] CPU/stack/latency ölçümlerini hedef kart, baud, trafik, build optimization ve RTOS tick bilgisiyle kaydet.
-- [ ] Bu belgedeki kutuları yalnız ilgili test sonucu varsa işaretle. Donanımda koşulmayan testleri açık bırak. `MIMARI.md` ve önceki yol haritasına yeni belgenin nihai durumunu işaret eden kısa referans ekle.
+- [x] CubeIDE Debug ve üretim/test kancaları kapalı yapılandırmayı tam derle ve bağla; yeni derleyici uyarısı/callback çakışması yok.
+- [x] Normal çift yön, parçalı çerçeve, sarım, taşma, başlangıç BUSY/ERROR, UART/DMA hata, kayıp/geç/senkron callback, queue dolu ve iki üreticili testler geçsin.
+- [x] Task/IRQ sahipliği, kritik bölüm süreleri ve “bildirim gelirken uykuya geçiş” tekrar incelensin.
+- [x] `Core/Src` üretim yollarında blocking transmit/receive, `HAL_Delay`, bloklayan abort beklemesi ve service busy-wait kalmadığını kontrol et. Deadline ile uyanıp bir kez yapılan durum kontrolü bu yasağın kapsamında değildir. HAL'in kendi ISR içindeki sınırlı işlemleri ayrıca ölç; uygulama callback'leriyle karıştırma.
+- [x] CPU/stack/latency ölçümlerini hedef kart, baud, trafik, build optimization ve RTOS tick bilgisiyle kaydet.
+- [x] Bu belgedeki kutuları yalnız ilgili test sonucu varsa işaretle. Donanımda koşulmayan testleri açık bırak. `MIMARI.md` ve önceki yol haritasına yeni belgenin nihai durumunu işaret eden kısa referans ekle.
 
 **Tamamlanma ölçütü:** UART için tek task, nihai tek RX/TX modülü, olayla uyuma, görünür hata/kayıp sonuçları ve bütün geçiş kapılarının gerçek sonuçlarla kapanması.
 

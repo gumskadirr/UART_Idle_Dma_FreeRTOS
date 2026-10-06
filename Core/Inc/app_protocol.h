@@ -19,6 +19,7 @@
 #define INC_APP_PROTOCOL_H_
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "parser.h"
 
 typedef struct
@@ -40,11 +41,13 @@ typedef struct
 } app_proto_state_t;
 
 extern app_proto_state_t app_proto_state;
+/* Diger tasklar dogrudan globals yerine bu tutarli deger kopyasini okur. */
+bool app_protocol_get_snapshot(app_proto_state_t *out);
 
 /* Sira takibini sifirlar. Alim baslatilmadan ONCE cagrilir. */
 void app_protocol_init(void);
 
-/* frame_handler_t imzasi: uart_rx_set_handler ile kaydedilir. */
+/* frame_handler_t imzasi: uart_comm_init handlers.on_frame ile kaydedilir. */
 void app_protocol_on_frame(const frame_info_t *info, void *user_data);
 
 #endif /* INC_APP_PROTOCOL_H_ */

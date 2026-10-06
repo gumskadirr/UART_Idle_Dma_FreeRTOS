@@ -21,6 +21,8 @@
 /* Bu basligin ICERIGI yalnizca UART_COMM_TEST derlemesinde vardir (P0).
    Uretim derlemesinde dosya dahil edilse bile hicbir sey tanimlamaz. */
 #ifdef UART_COMM_TEST
+/* Bare-metal test owner'i TX sonuc kutusunu her tur tuketir. */
+void test_tx_service(void);
 
 #define TEST_SONUC_ADET   32U
 #define LB_SONUC_ADET     24U

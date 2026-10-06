@@ -1,0 +1,1303 @@
+#include "uart_comm.h"
+#include "uart_comm_test.h"
+#if !defined(UART_HAL_MODEL) || defined(UART_RTOS_MODEL)
+#define COMM_RTOS 1
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+static void comm_notify(void);
+#define COMM_NOTIFY() comm_notify()
+#else
+#define COMM_NOTIFY() ((void)0)
+#endif
+#if defined(UART_COMM_TEST) && !defined(UART_HAL_MODEL)
+static volatile comm_test_profile_t profile;
+static uint32_t irq_started, critical_started, critical_caller, rx_notified;
+static uint8_t rx_latency_pending;
+static uint32_t cycles(void) { return DWT->CYCCNT; }
+typedef struct { uint32_t cycles, irq_cycles; } cycle_sample_t;
+static cycle_sample_t cycle_sample(void)
+{
+    uint32_t saved = __get_PRIMASK();
+    cycle_sample_t out;
+    __disable_irq();
+    out.cycles = cycles(); out.irq_cycles = profile.irq_cycles;
+    __set_PRIMASK(saved);
+    return out;
+}
+static uint32_t cycle_elapsed(cycle_sample_t before)
+{
+    cycle_sample_t after = cycle_sample();
+    return after.cycles - before.cycles - (after.irq_cycles - before.irq_cycles);
+}
+#define COMM_PROFILE 1
+#endif
+/* Circular RX DMA. Parser ve HAL islemlerinin tek sahibi ana dongu/tasktir.
+ * Kesme yalniz olay kaydeder; DMA bellegi parser'a sabit kopya ile verilir. */
+#include <stddef.h>
+
+typedef struct {
+    frame_parser_t parser;
+    frame_handler_t handler;
+    void *handler_user;
+    volatile rx_phase_t phase;
+    uint8_t parser_ready;
+
+    volatile uint32_t wrap_base, session, error_generation;
+    uint32_t consumed, last_producer, frame_tick;
+
+    struct {
+        volatile uint8_t data, error, health;
+        volatile uint32_t fault_tick;
+    } events;
+
+    struct {
+        uint8_t active;
+        uint32_t first_failure, retry_at;
+    } sample;
+
+    struct {
+        uint8_t active, attempts, final_stop, requested;
+        uint32_t started_at, healthy_since, retry_at, abort_at;
+    } recovery;
+} rx_context_t;
+
+typedef struct {
+    uint8_t buffer[UART_TX_BUF_SIZE];
+    uint16_t length;
+    volatile tx_state_t phase;
+    volatile uint8_t active_attempt;
+    uint32_t started_at, abort_at;
+    tx_result_t result;
+    uint8_t result_ready;
+    struct { volatile uint8_t done, error, aborted; volatile uint32_t error_code; } events;
+} tx_context_t;
+#ifdef COMM_RTOS
+#define COMM_QUEUE_SIZE 8U
+#define COMM_STACK_SIZE 512U
+#define COMM_TASK_PRIORITY 25U /* CMSIS default task = native priority 24. */
+typedef struct {
+    uint32_t tag, admission_epoch;
+    uint16_t len;
+    uint8_t bytes[FRAME_MAX_SIZE];
+} tx_item_t;
+static StaticTask_t owner_tcb;
+static StackType_t owner_stack[COMM_STACK_SIZE];
+static StaticQueue_t queue_cb;
+static uint8_t queue_storage[COMM_QUEUE_SIZE * sizeof(tx_item_t)];
+#endif
+static struct {
+    UART_HandleTypeDef *uart;
+    rx_context_t rx;
+    tx_context_t tx;
+#ifdef COMM_RTOS
+    TaskHandle_t task;
+    QueueHandle_t queue;
+    uart_comm_handlers_t handlers;
+    uart_comm_snapshot_t counters, published;
+    uint32_t epoch, recovery_requests;
+    bool initialized, accepting, active_valid;
+    tx_item_t active;
+#ifdef UART_COMM_TEST
+    uint8_t test_fault;
+#endif
+#endif
+} comm;
+static uint8_t dma_buffer[UART_RX_BUF_SIZE];
+UART_LOCAL rx_stats_t rx_stats;
+
+#ifdef UART_COMM_TEST
+static struct {
+    uint8_t restart_fail, start_fail, sample_fail, copy_hook, sync_error;
+} test;
+#endif
+
+/* Kritik bolumler yalniz paylasilan olay/register kaydini korur.
+ * DMA durmaz. HAL, parser ve uygulama handler'i burada cagrilmaz. */
+static uint32_t lock(void)
+{
+    uint32_t saved = __get_PRIMASK();
+    __disable_irq();
+#ifdef COMM_PROFILE
+    if (saved == 0U) { critical_started = cycles(); critical_caller = (uint32_t)__builtin_return_address(0); }
+#endif
+    return saved;
+}
+
+static void unlock(uint32_t saved)
+{
+#ifdef COMM_PROFILE
+    if (saved == 0U) {
+        uint32_t elapsed = cycles() - critical_started;
+        if (elapsed > profile.max_critical_cycles) {
+            profile.max_critical_cycles = elapsed;
+            profile.max_critical_caller = critical_caller;
+        }
+    }
+#endif
+    __set_PRIMASK(saved);
+}
+
+static uint32_t remaining(uint32_t now, uint32_t deadline)
+{
+    return ((int32_t)(deadline - now) <= 0) ? 0U : deadline - now;
+}
+
+static void set_phase(rx_phase_t phase)
+{
+    comm.rx.phase = phase;
+    rx_stats.faulted = (uint8_t)(phase == UART_RX_PHASE_FAULT);
+}
+
+/* Sahiplik kontrolu: herhangi bir etkin/abort halinde tampon kullanilamaz. */
+static uint8_t hardware_active(const UART_HandleTypeDef *uart)
+{
+    if (uart == NULL) return 0U;
+    if (uart->RxState == HAL_UART_STATE_BUSY_RX ||
+        READ_BIT(uart->Instance->CR3, USART_CR3_DMAR) != 0U) return 1U;
+    if (uart->hdmarx == NULL || uart->hdmarx->Instance == NULL) return 0U;
+    return (uint8_t)(READ_BIT(uart->hdmarx->Instance->CR, DMA_SxCR_EN) != 0U ||
+                     uart->hdmarx->State == HAL_DMA_STATE_BUSY ||
+                     uart->hdmarx->State == HAL_DMA_STATE_ABORT);
+}
+
+/* Saglik kontrolu sahiplikten farklidir: butun kosullar saglanmalidir. */
+static uint8_t hardware_healthy(void)
+{
+    return (uint8_t)(comm.uart->RxState == HAL_UART_STATE_BUSY_RX &&
+        comm.uart->ReceptionType == HAL_UART_RECEPTION_TOIDLE &&
+        comm.uart->hdmarx->State == HAL_DMA_STATE_BUSY &&
+        READ_BIT(comm.uart->Instance->CR3, USART_CR3_DMAR) != 0U &&
+        READ_BIT(comm.uart->hdmarx->Instance->CR, DMA_SxCR_EN) != 0U);
+}
+
+/* Callback, durus kaniti degildir. Eski RX kaynaklari da kapanmis olmali. */
+static uint8_t hardware_stopped(void)
+{
+    if (comm.uart == NULL) return 0U;
+    return (uint8_t)(comm.uart->RxState == HAL_UART_STATE_READY &&
+        comm.uart->hdmarx->State == HAL_DMA_STATE_READY &&
+        READ_BIT(comm.uart->Instance->CR3, USART_CR3_DMAR | USART_CR3_EIE) == 0U &&
+        READ_BIT(comm.uart->Instance->CR1,
+                 USART_CR1_IDLEIE | USART_CR1_RXNEIE | USART_CR1_PEIE) == 0U &&
+        READ_BIT(comm.uart->hdmarx->Instance->CR, DMA_SxCR_EN) == 0U);
+}
+
+static uint8_t fault_pending(void)
+{
+    return (uint8_t)(comm.rx.events.error != 0U || comm.rx.events.health != 0U);
+}
+
+static void signal_fault(uint8_t health)
+{
+    uint32_t now = HAL_GetTick();
+    uint32_t saved = lock();
+    if (!fault_pending()) comm.rx.events.fault_tick = now;
+    if (health) comm.rx.events.health = 1U;
+    else comm.rx.events.error = 1U;
+    comm.rx.error_generation++;
+    unlock(saved);
+}
+
+static uint8_t take_fault(uint32_t *when)
+{
+    uint32_t saved = lock();
+    uint8_t pending = fault_pending();
+    *when = comm.rx.events.fault_tick;
+    comm.rx.events.error = comm.rx.events.health = 0U;
+    unlock(saved);
+    return pending;
+}
+
+/* Yalniz guvenli durustan sonra. HAL start da eski stream bayraklarini siler. */
+static void reset_progress(void)
+{
+    uint32_t saved = lock();
+    __HAL_DMA_CLEAR_FLAG(comm.uart->hdmarx,
+                        __HAL_DMA_GET_TC_FLAG_INDEX(comm.uart->hdmarx));
+    comm.rx.wrap_base = comm.rx.consumed = 0U;
+    comm.rx.session++;
+    comm.rx.events.data = comm.rx.events.error = comm.rx.events.health = 0U;
+    unlock(saved);
+    comm.rx.sample.active = 0U;
+    comm.rx.last_producer = 0U;
+    comm.rx.frame_tick = HAL_GetTick();
+}
+
+UART_LOCAL uint32_t rx_producer_from(uint32_t wrap_base, uint8_t pending_tc, uint32_t ndtr)
+{
+    return wrap_base + (pending_tc ? UART_RX_BUF_SIZE : 0U) + UART_RX_BUF_SIZE - ndtr;
+}
+
+/* TCIF iki okuma arasinda degisirse veya NDTR yeniden yukleniyorsa tekrar.
+ * Bekleyen TC, ISR'nin henuz saymadigi bir turdur; Size degerleri toplanmaz. */
+static uint8_t sample_producer(uint32_t *out)
+{
+    uint8_t attempt;
+    DMA_HandleTypeDef *dma;
+    if (comm.uart == NULL || out == NULL) return 0U;
+    dma = comm.uart->hdmarx;
+#ifdef UART_COMM_TEST
+    if (test.sample_fail) return 0U;
+#endif
+    for (attempt = 0U; attempt < 3U; attempt++) {
+        uint32_t saved = lock();
+        uint32_t base = comm.rx.wrap_base;
+        uint32_t before = __HAL_DMA_GET_FLAG(dma, __HAL_DMA_GET_TC_FLAG_INDEX(dma));
+        uint32_t ndtr = __HAL_DMA_GET_COUNTER(dma);
+        uint32_t after = __HAL_DMA_GET_FLAG(dma, __HAL_DMA_GET_TC_FLAG_INDEX(dma));
+        unlock(saved);
+        if (before != after || ndtr == 0U || ndtr > UART_RX_BUF_SIZE) continue;
+        *out = rx_producer_from(base, (uint8_t)(before != 0U), ndtr);
+        return 1U;
+    }
+    return 0U;
+}
+
+/* Tum servis ornekleri ayni erteleme, hata butcesi ve frame saatini kullanir. */
+static uint8_t sample_progress(uint32_t *out)
+{
+    uint32_t now = HAL_GetTick();
+    if (comm.rx.sample.active && remaining(now, comm.rx.sample.retry_at) != 0U) return 0U;
+    if (sample_producer(out)) {
+        comm.rx.sample.active = 0U;
+        if (*out != comm.rx.last_producer) {
+            comm.rx.last_producer = *out;
+            comm.rx.frame_tick = now;
+        }
+        return 1U;
+    }
+    if (!comm.rx.sample.active) {
+        comm.rx.sample.active = 1U;
+        comm.rx.sample.first_failure = now;
+    }
+    comm.rx.sample.retry_at = now + 1U;
+    rx_stats.sample_defers++;
+    if ((now - comm.rx.sample.first_failure) >= UART_RX_SAMPLE_FAIL_MS) {
+        comm.rx.sample.active = 0U;
+        rx_stats.sample_fails++;
+        signal_fault(0U);
+    }
+    return 0U;
+}
+
+static void close_recovery(void);
+static void frame_received(const frame_info_t *info, void *unused)
+{
+    uint32_t saved = lock();
+    (void)unused;
+    /* Yeni oturumdaki ilk gecerli cerceve saglik kanitidir. Ayni anda gelen
+     * yeni hatayi affetme; handler kritik bolum disinda kalir. */
+    if (comm.rx.recovery.active && !fault_pending() && hardware_healthy()) close_recovery();
+    unlock(saved);
+    if (comm.rx.handler != NULL) comm.rx.handler(info, comm.rx.handler_user);
+}
+
+#ifdef UART_COMM_TEST
+static void copy_test_hook(void)
+{
+    switch (test.copy_hook) {
+    case UART_RX_COPY_HOOK_SAMPLE_FAIL: test.sample_fail = 1U; break;
+    case UART_RX_COPY_HOOK_OVERWRITE: comm.rx.wrap_base += UART_RX_BUF_SIZE; break;
+    case UART_RX_COPY_HOOK_ERROR_GEN: comm.rx.error_generation++; break;
+    default: break;
+    }
+    test.copy_hook = UART_RX_COPY_HOOK_NONE;
+}
+#endif
+
+UART_LOCAL uint8_t rx_service_budget(uint16_t budget)
+{
+#ifdef COMM_PROFILE
+    if (rx_latency_pending) {
+        uint32_t elapsed = cycles() - rx_notified;
+        if (elapsed > profile.max_rx_latency_cycles) profile.max_rx_latency_cycles = elapsed;
+        rx_latency_pending = 0U;
+    }
+#endif
+    uint8_t scratch[UART_RX_SCRATCH_SIZE];
+    uint32_t produced;
+    if (comm.rx.phase != UART_RX_PHASE_RUNNING || fault_pending()) return 0U;
+
+    while (budget != 0U) {
+        uint32_t available, count, index, session, generation, after, i;
+        if (fault_pending() || !sample_progress(&produced)) return 0U;
+        available = produced - comm.rx.consumed;
+        if (available == 0U) return 0U;
+        if (available >= UART_RX_BUF_SIZE) {
+            rx_stats.overruns++;
+            rx_stats.discarded_bytes += available;
+            frame_parser_discard(&comm.rx.parser);
+            comm.rx.consumed = produced;
+            return 1U;
+        }
+
+        index = comm.rx.consumed % UART_RX_BUF_SIZE;
+        count = available;
+        if (count > UART_RX_SCRATCH_SIZE) count = UART_RX_SCRATCH_SIZE;
+        if (count > UART_RX_BUF_SIZE - index) count = UART_RX_BUF_SIZE - index;
+        if (count > budget) count = budget;
+        session = comm.rx.session;
+        generation = comm.rx.error_generation;
+
+        __DMB();
+        for (i = 0U; i < count; i++) scratch[i] = ((volatile const uint8_t *)dma_buffer)[index + i];
+        __DMB();
+#ifdef UART_COMM_TEST
+        copy_test_hook();
+#endif
+        if (!sample_progress(&after)) return 0U;
+        if (after - comm.rx.consumed >= UART_RX_BUF_SIZE || session != comm.rx.session ||
+            generation != comm.rx.error_generation || fault_pending()) {
+            rx_stats.copy_rejects++;
+            return 1U;
+        }
+
+        comm.rx.consumed += count;
+        rx_stats.bytes_consumed += count;
+        budget -= (uint16_t)count;
+        frame_parser_feed(&comm.rx.parser, scratch, (uint16_t)count, frame_received, NULL);
+    }
+    return (uint8_t)(!fault_pending() && sample_progress(&produced) && produced != comm.rx.consumed);
+}
+
+/* Timeout veri tuketmez: tur butcesi ikinci kez acilmaz. Yeni veri varsa
+ * sonraki tur icin olay birakilir; sample retry suresini de bu yol korur. */
+static void service_timeout(void)
+{
+    uint32_t produced, now = HAL_GetTick();
+    if (comm.rx.parser.len == 0U || comm.rx.events.data || fault_pending() ||
+        (now - comm.rx.frame_tick) < UART_RX_FRAME_TIMEOUT_MS) return;
+    if (!sample_progress(&produced)) return;
+    if (produced != comm.rx.consumed) {
+        comm.rx.events.data = 1U;
+        return;
+    }
+    now = HAL_GetTick();
+    if ((now - comm.rx.frame_tick) >= UART_RX_FRAME_TIMEOUT_MS && !fault_pending()) {
+        frame_parser_timeout(&comm.rx.parser, frame_received, NULL);
+        rx_stats.frame_timeouts++;
+        comm.rx.frame_tick = now;
+    }
+}
+
+static void close_recovery(void)
+{
+    comm.rx.recovery.active = comm.rx.recovery.attempts = comm.rx.recovery.final_stop = 0U;
+}
+
+static void open_recovery(uint32_t now)
+{
+    if (!comm.rx.recovery.active) {
+        comm.rx.recovery.active = 1U;
+        comm.rx.recovery.attempts = 0U;
+        comm.rx.recovery.started_at = comm.rx.recovery.retry_at = now;
+    }
+}
+
+static void enter_fault(void)
+{
+    if (!hardware_stopped()) {
+        uint32_t saved = lock();
+        /* CR1/CR3 TX ile ortaktir; RX temizligi TX IRQ'nun yazisini ezmemeli. */
+        CLEAR_BIT(comm.uart->Instance->CR3, USART_CR3_DMAR | USART_CR3_EIE);
+        CLEAR_BIT(comm.uart->Instance->CR1, USART_CR1_IDLEIE | USART_CR1_RXNEIE | USART_CR1_PEIE);
+        unlock(saved);
+        rx_stats.recovery_fails++;
+    }
+    close_recovery();
+    comm.rx.recovery.requested = 0U;
+    set_phase(UART_RX_PHASE_FAULT);
+}
+
+static void begin_abort(uint32_t now, uint8_t final_stop)
+{
+    comm.rx.recovery.abort_at = now;
+    comm.rx.recovery.final_stop = final_stop;
+    set_phase(UART_RX_PHASE_ABORTING);
+    /* HAL'in baslattigi DMA abort'un callback'ini ikinci bir abort ile ezme. */
+    if (comm.uart->hdmarx->State == HAL_DMA_STATE_ABORT) return;
+    if (HAL_UART_AbortReceive_IT(comm.uart) != HAL_OK) rx_stats.abort_start_fails++;
+}
+
+static uint8_t start_hardware(void)
+{
+    HAL_StatusTypeDef result;
+    uint32_t saved;
+    uint8_t healthy;
+    reset_progress();
+    set_phase(UART_RX_PHASE_STARTING);
+#ifdef UART_COMM_TEST
+    if (test.sync_error) rx_on_error(comm.uart, HAL_UART_ERROR_DMA);
+#endif
+    result = HAL_UARTEx_ReceiveToIdle_DMA(comm.uart, dma_buffer, sizeof(dma_buffer));
+#ifdef UART_COMM_TEST
+    if (test.start_fail) { test.start_fail = 0U; result = HAL_ERROR; }
+#endif
+    saved = lock();
+    healthy = (uint8_t)(result == HAL_OK && !fault_pending() && hardware_healthy());
+    if (healthy) {
+        comm.rx.recovery.healthy_since = HAL_GetTick();
+        set_phase(UART_RX_PHASE_RUNNING);
+    }
+    unlock(saved);
+    return healthy;
+}
+
+static void try_restart(uint32_t now)
+{
+    comm.rx.recovery.attempts++;
+    comm.rx.recovery.retry_at = now + UART_RX_RESTART_RETRY_MS;
+    __HAL_UART_CLEAR_OREFLAG(comm.uart);
+    comm.uart->ErrorCode = HAL_UART_ERROR_NONE;
+    frame_parser_discard(&comm.rx.parser);
+#ifdef UART_COMM_TEST
+    if (test.restart_fail) {
+        reset_progress();
+        rx_stats.restart_fails++;
+        return;
+    }
+#endif
+    if (start_hardware()) {
+        rx_stats.restarts++;
+    } else {
+        rx_stats.restart_fails++;
+        set_phase(UART_RX_PHASE_RETRY_WAIT);
+    }
+}
+
+/* Toparlanmayi phase yonetir. Ayrica recover_pending/abort_done bayragi yok. */
+static void service_recovery(uint32_t now)
+{
+    switch (comm.rx.phase) {
+    case UART_RX_PHASE_ABORTING:
+        if (hardware_stopped()) {
+            if (comm.rx.recovery.final_stop) enter_fault();
+            else set_phase(UART_RX_PHASE_RETRY_WAIT);
+        } else if ((now - comm.rx.recovery.abort_at) >= UART_RX_ABORT_TIMEOUT_MS) {
+            enter_fault();
+        }
+        break;
+    case UART_RX_PHASE_RETRY_WAIT:
+        if (comm.rx.recovery.attempts >= UART_RX_RESTART_MAX_TRIES ||
+            (now - comm.rx.recovery.started_at) >= UART_RX_RECOVERY_BUDGET_MS) {
+            if (hardware_stopped()) enter_fault();
+            else begin_abort(now, 1U);
+        } else if (remaining(now, comm.rx.recovery.retry_at) == 0U) {
+            if (hardware_stopped()) try_restart(now);
+            else begin_abort(now, 0U);
+        }
+        break;
+    case UART_RX_PHASE_FAULT:
+        if (comm.rx.recovery.requested) {
+            comm.rx.recovery.requested = 0U;
+            open_recovery(now);
+            if (hardware_stopped()) set_phase(UART_RX_PHASE_RETRY_WAIT);
+            else begin_abort(now, 0U);
+        }
+        break;
+    default: break;
+    }
+}
+
+UART_LOCAL HAL_StatusTypeDef rx_start(UART_HandleTypeDef *uart)
+{
+    if (uart == NULL || uart->Instance == NULL || uart->hdmarx == NULL) return HAL_ERROR;
+    if (comm.rx.phase == UART_RX_PHASE_STARTING || comm.rx.phase == UART_RX_PHASE_RUNNING ||
+        comm.rx.phase == UART_RX_PHASE_ABORTING || hardware_active(comm.uart) || hardware_active(uart)) {
+        rx_stats.start_rejects++;
+        return HAL_BUSY;
+    }
+    if (uart->hdmarx->Instance == NULL) return HAL_ERROR;
+    comm.uart = uart;
+    close_recovery();
+    comm.rx.recovery.requested = 0U;
+    if (!comm.rx.parser_ready) {
+        frame_parser_init(&comm.rx.parser);
+        comm.rx.parser_ready = 1U;
+    } else frame_parser_discard(&comm.rx.parser);
+    if (start_hardware()) return HAL_OK;
+    rx_stats.start_fails++;
+    set_phase(UART_RX_PHASE_FAULT);
+    /* Donus hala gorunur HAL_ERROR/FAULT; owner sonraki turda ayni sinirli
+     * durdurma/deneme politikasini isletir. Acilis hatasi firmware'i kilitlemez. */
+    open_recovery(HAL_GetTick());
+    comm.rx.recovery.requested = 1U;
+    return HAL_ERROR;
+}
+
+UART_LOCAL void rx_service(void)
+{
+    uint32_t now = HAL_GetTick(), fault_at;
+    uint8_t fault;
+    if (comm.uart == NULL) return;
+    fault = take_fault(&fault_at);
+
+    /* Saglikli sessizlik sonrasi yeni hata, eski donemin butcesini kullanmaz.
+     * Ilk hata zamani saklanir: gec servis, erken gelen hatayi affetmez. */
+    if (comm.rx.phase == UART_RX_PHASE_RUNNING && comm.rx.recovery.active &&
+        ((fault ? fault_at : now) - comm.rx.recovery.healthy_since) >= UART_RX_HEALTHY_MS) {
+        close_recovery();
+    }
+    if (fault && comm.rx.phase == UART_RX_PHASE_RUNNING) {
+        open_recovery(now);
+        begin_abort(now, 0U);
+    }
+    service_recovery(now);
+    if (comm.rx.phase != UART_RX_PHASE_RUNNING) return;
+
+    /* IRQ yokken de ertelenmis ornekleme islenir. Timeout ikinci drain yapmaz. */
+    if (comm.rx.events.data || comm.rx.sample.active) {
+        uint32_t saved = lock();
+        comm.rx.events.data = 0U;
+        unlock(saved);
+        if (rx_service_budget(UART_RX_SERVICE_BUDGET)) comm.rx.events.data = 1U;
+    }
+    service_timeout();
+}
+
+UART_LOCAL uint32_t rx_next_wait_ms(uint32_t now)
+{
+    if (comm.uart == NULL) return UINT32_MAX;
+    if (fault_pending() || comm.rx.recovery.requested) return 0U;
+    switch (comm.rx.phase) {
+    case UART_RX_PHASE_RUNNING:
+        if (comm.rx.sample.active) return remaining(now, comm.rx.sample.retry_at);
+        if (comm.rx.events.data) return 0U;
+        return comm.rx.parser.len ? remaining(now, comm.rx.frame_tick + UART_RX_FRAME_TIMEOUT_MS) : UINT32_MAX;
+    case UART_RX_PHASE_ABORTING:
+        return remaining(now, comm.rx.recovery.abort_at + UART_RX_ABORT_TIMEOUT_MS);
+    case UART_RX_PHASE_RETRY_WAIT: {
+        uint32_t retry = remaining(now, comm.rx.recovery.retry_at);
+        uint32_t limit = remaining(now, comm.rx.recovery.started_at + UART_RX_RECOVERY_BUDGET_MS);
+        return retry < limit ? retry : limit;
+    }
+    default: return UINT32_MAX;
+    }
+}
+
+UART_LOCAL void rx_set_handler(frame_handler_t handler, void *user)
+{
+    if (comm.rx.phase == UART_RX_PHASE_STOPPED || comm.rx.phase == UART_RX_PHASE_FAULT) {
+        comm.rx.handler = handler;
+        comm.rx.handler_user = user;
+    }
+}
+
+UART_LOCAL uint8_t rx_request_recovery(void)
+{
+    if (comm.rx.phase != UART_RX_PHASE_FAULT) return 0U;
+    comm.rx.recovery.requested = 1U;
+    return 1U;
+}
+
+UART_LOCAL rx_phase_t rx_get_phase(void) { return comm.rx.phase; }
+UART_LOCAL uint8_t rx_is_quiescent(void) { return hardware_stopped(); }
+UART_LOCAL uint8_t rx_get_produced(uint32_t *out) { return sample_producer(out); }
+UART_LOCAL uint32_t rx_get_consumed(void) { return comm.rx.consumed; }
+UART_LOCAL const frame_parser_t *rx_get_parser(void) { return &comm.rx.parser; }
+UART_LOCAL void rx_drain(void) { (void)rx_service_budget(UART_RX_SERVICE_BUDGET); }
+
+/* HAL callback'leri: sadece bu handle'a ait olaylari kaydet. */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *uart, uint16_t size)
+{
+    HAL_UART_RxEventTypeTypeDef type = HAL_UARTEx_GetRxEventType(uart);
+    uint32_t saved;
+    if (uart != comm.uart) return;
+    saved = lock();
+    rx_stats.rx_events++;
+    rx_stats.last_size = size;
+    comm.rx.events.data = 1U;
+#ifdef COMM_PROFILE
+    if (!rx_latency_pending) { rx_notified = cycles(); rx_latency_pending = 1U; }
+#endif
+    switch (type) {
+    case HAL_UART_RXEVENT_TC:
+        rx_stats.tc_events++;
+        if (comm.rx.phase == UART_RX_PHASE_RUNNING || comm.rx.phase == UART_RX_PHASE_STARTING)
+            comm.rx.wrap_base += UART_RX_BUF_SIZE;
+        else rx_stats.late_events++;
+        break;
+    case HAL_UART_RXEVENT_HT: rx_stats.ht_events++; break;
+    case HAL_UART_RXEVENT_IDLE: rx_stats.idle_events++; break;
+    default: break;
+    }
+    unlock(saved);
+    COMM_NOTIFY();
+}
+
+UART_LOCAL void rx_on_error(UART_HandleTypeDef *uart, uint32_t error)
+{
+    if (uart == NULL || uart != comm.uart) return;
+    rx_stats.error_events++;
+    rx_stats.last_error = error;
+    signal_fault(0U);
+}
+
+UART_LOCAL void rx_on_abort_complete(UART_HandleTypeDef *uart)
+{
+    if (uart != NULL && uart == comm.uart) {
+        rx_stats.abort_complete_events++;
+        COMM_NOTIFY();
+    }
+}
+
+void uart_comm_on_uart_irq_exit(void)
+{
+    if (comm.rx.phase == UART_RX_PHASE_RUNNING && !hardware_healthy() && !comm.rx.events.health) {
+        rx_stats.irq_health_events++;
+        signal_fault(1U);
+        COMM_NOTIFY();
+    }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *uart)
+{
+    uint32_t error = uart->ErrorCode;
+    rx_on_error(uart, error);
+    if ((error & HAL_UART_ERROR_DMA) != 0U) tx_on_error(uart, error);
+    /* Thread baglaminda notify owner'i hemen calistirabilir: iki yonun ham
+     * kaydi tamamlanmadan bildirim verme. */
+    COMM_NOTIFY();
+}
+
+void HAL_UART_AbortReceiveCpltCallback(UART_HandleTypeDef *uart) { rx_on_abort_complete(uart); }
+
+#ifdef UART_COMM_TEST
+UART_LOCAL void rx_force_restart_fail(uint8_t value) { test.restart_fail = value; }
+UART_LOCAL void rx_force_start_fail(uint8_t value) { test.start_fail = value; }
+UART_LOCAL void rx_test_sync_error_on_start(uint8_t value) { test.sync_error = value; }
+UART_LOCAL void rx_test_force_sample_fail(uint8_t value) { test.sample_fail = value; }
+UART_LOCAL void rx_test_set_copy_hook(uint8_t value) { test.copy_hook = value; }
+UART_LOCAL void rx_test_inject_error(void) { signal_fault(0U); COMM_NOTIFY(); }
+UART_LOCAL uint8_t rx_test_get_restart_tries(void) { return comm.rx.recovery.attempts; }
+UART_LOCAL uint8_t rx_test_recovery_active(void) { return comm.rx.recovery.active; }
+UART_LOCAL uint32_t rx_test_get_session(void) { return comm.rx.session; }
+UART_LOCAL uint32_t rx_test_get_wrap_base(void) { return comm.rx.wrap_base; }
+#endif
+
+/* ==================== TX DMA ==================== */
+/* TX DMA: kesme olay kaydeder, tek owner servis karari verir. */
+#include <stddef.h>
+#include <string.h>
+
+UART_LOCAL tx_stats_t tx_stats;
+#ifdef UART_COMM_TEST
+static HAL_StatusTypeDef test_start_status = HAL_OK;
+static uint8_t test_drop_done, test_drop_abort, test_bad_dma;
+UART_LOCAL void tx_test_faults(HAL_StatusTypeDef status, uint8_t drop_done,
+                         uint8_t drop_abort, uint8_t bad_dma)
+{
+    test_start_status = status;
+    test_drop_done = drop_done;
+    test_drop_abort = drop_abort;
+    test_bad_dma = bad_dma;
+}
+#endif
+
+typedef struct {
+    uint8_t done, error, aborted;
+    uint32_t error_code;
+} tx_events_t;
+
+
+static void disable_half_irq(void)
+{
+    /* F407 HTIE = CR bit 3. Aktif DMA'nin EN biti donanimda da degisebilir;
+     * tum CR'yi read-modify-write etmek bitleri eski degerle geri yazabilir.
+     * Peripheral bit-band yalniz HTIE'yi temizler. */
+#ifdef UART_HAL_MODEL
+    model_bitband_clear(&comm.uart->hdmatx->Instance->CR, DMA_IT_HT);
+#else
+    uintptr_t alias = PERIPH_BB_BASE +
+        ((uintptr_t)&comm.uart->hdmatx->Instance->CR - PERIPH_BASE) * 32U + 3U * 4U;
+    *(volatile uint32_t *)alias = 0U;
+#endif
+}
+
+/* Tampon serbestligi ve hat sessizligi ayri ayri dogrulanir. */
+static uint8_t tx_hardware_stopped(const UART_HandleTypeDef *handle)
+{
+    if (handle == NULL) return 1U;
+    return (uint8_t)(handle->gState == HAL_UART_STATE_READY &&
+        handle->hdmatx->State == HAL_DMA_STATE_READY &&
+        READ_BIT(handle->hdmatx->Instance->CR, DMA_SxCR_EN) == 0U &&
+        READ_BIT(handle->Instance->CR3, USART_CR3_DMAT) == 0U &&
+        READ_BIT(handle->Instance->CR1, USART_CR1_TXEIE | USART_CR1_TCIE) == 0U &&
+        READ_BIT(handle->Instance->SR, USART_SR_TC) != 0U);
+}
+
+static void clear_old_sources(void)
+{
+    DMA_HandleTypeDef *dma = comm.uart->hdmatx;
+    __HAL_DMA_CLEAR_FLAG(dma, __HAL_DMA_GET_TC_FLAG_INDEX(dma) |
+        __HAL_DMA_GET_HT_FLAG_INDEX(dma) | __HAL_DMA_GET_TE_FLAG_INDEX(dma) |
+        __HAL_DMA_GET_DME_FLAG_INDEX(dma) | __HAL_DMA_GET_FE_FLAG_INDEX(dma));
+    /* Yalniz TX DMA IRQ; ortak USART2 pending kaydi korunur. */
+    HAL_NVIC_ClearPendingIRQ(DMA1_Stream6_IRQn);
+}
+
+/* Cagiran lock tutar. Yeni olay snapshot ile karar arasinda kaybolmaz. */
+static tx_events_t take_locked(void)
+{
+    tx_events_t out = {comm.tx.events.done, comm.tx.events.error, comm.tx.events.aborted, comm.tx.events.error_code};
+    comm.tx.events.done = comm.tx.events.error = comm.tx.events.aborted = 0U;
+    comm.tx.events.error_code = 0U;
+    return out;
+}
+static tx_events_t take_events(void)
+{
+    uint32_t saved = lock();
+    tx_events_t out = take_locked();
+    unlock(saved);
+    return out;
+}
+static void merge_events(tx_events_t *pending, tx_events_t extra)
+{
+    pending->done |= extra.done;
+    pending->error |= extra.error;
+    pending->aborted |= extra.aborted;
+    pending->error_code |= extra.error_code;
+}
+
+/* Sonuc tek kutuda tutulur. Tuketilene kadar yeni aktarim kabul edilmez. */
+static void finish(tx_state_t next, uint8_t recovery_fault)
+{
+    comm.tx.phase = next;
+    comm.tx.active_attempt = 0U;
+    comm.tx.result.recovery_fault = recovery_fault != 0U;
+    comm.tx.result_ready = 1U;
+    if (recovery_fault) tx_stats.recovery_fails++;
+}
+static void fail(tx_result_code_t code, uint32_t error, uint32_t now)
+{
+    comm.tx.result.code = code;
+    comm.tx.result.hal_error = error;
+    comm.tx.result.recovery_fault = false;
+    tx_stats.last_hal_error = error;
+    if (code == UART_TX_RESULT_TIMEOUT) {
+        tx_stats.transfer_timeouts++;
+        tx_stats.last_fail = UART_TX_FAIL_TIMEOUT;
+    } else {
+        if (code == UART_TX_RESULT_DMA_ERROR) tx_stats.transfer_errors++;
+        tx_stats.last_fail = UART_TX_FAIL_TRANSFER;
+    }
+    comm.tx.abort_at = now;
+    comm.tx.active_attempt = 0U;
+    comm.tx.phase = UART_TX_ABORTING;
+}
+static void issue_abort(void)
+{
+    /* Native HAL'in suren abort callback'ini ikinci cagriyla degistirme. */
+    if (comm.uart->hdmatx->State == HAL_DMA_STATE_ABORT) return;
+    if (HAL_UART_AbortTransmit_IT(comm.uart) != HAL_OK) tx_stats.abort_start_fails++;
+}
+
+UART_LOCAL HAL_StatusTypeDef tx_init(UART_HandleTypeDef *handle)
+{
+    uint32_t saved;
+    if (handle == NULL || handle->Instance == NULL || handle->hdmatx == NULL ||
+        handle->hdmatx->Instance == NULL) return HAL_ERROR;
+    if (comm.tx.phase == UART_TX_SENDING || comm.tx.phase == UART_TX_ABORTING) return HAL_BUSY;
+    if (comm.tx.result_ready) return HAL_BUSY;
+    if (!tx_hardware_stopped(comm.uart) || !tx_hardware_stopped(handle)) return HAL_ERROR;
+    saved = lock();
+    comm.uart = handle;
+    comm.tx.length = 0U;
+    comm.tx.active_attempt = 0U;
+    (void)take_locked();
+    clear_old_sources();
+    comm.tx.phase = UART_TX_IDLE;
+    unlock(saved);
+    return HAL_OK;
+}
+
+UART_LOCAL tx_status_t tx_send_copy(const uint8_t *data, uint16_t len)
+{
+    HAL_StatusTypeDef status;
+    uint32_t saved;
+    if (comm.uart == NULL || comm.tx.phase == UART_TX_FAULT) return UART_TX_NOT_READY;
+    if (data == NULL || len == 0U || len > UART_TX_BUF_SIZE) {
+        tx_stats.rejected_invalid++;
+        return UART_TX_INVALID;
+    }
+    if (comm.tx.phase != UART_TX_IDLE || comm.tx.result_ready) {
+        tx_stats.rejected_busy++;
+        return UART_TX_BUSY;
+    }
+    if (!tx_hardware_stopped(comm.uart)) {
+        comm.tx.phase = UART_TX_FAULT;
+        return UART_TX_NOT_READY;
+    }
+    memcpy(comm.tx.buffer, data, len);
+    saved = lock();
+    clear_old_sources();
+    (void)take_locked();
+    comm.tx.length = len;
+    comm.tx.started_at = HAL_GetTick();
+    comm.tx.active_attempt = 1U;
+    comm.tx.phase = UART_TX_SENDING;
+    unlock(saved);
+    __DMB();
+#ifdef UART_COMM_TEST
+    /* STM32F407 CCM CPU'ya baglidir, DMA erisemez (RM0090, bus matrix).
+     * CPU adresi okumaz; DMA'nin gercek TE kesmesi/HAL yolu sinanir. */
+    status = test_start_status != HAL_OK ? test_start_status :
+        HAL_UART_Transmit_DMA(comm.uart, test_bad_dma ? (uint8_t *)0x10000000U : comm.tx.buffer, len);
+#else
+    status = HAL_UART_Transmit_DMA(comm.uart, comm.tx.buffer, len);
+#endif
+    if (status == HAL_OK) {
+        disable_half_irq();
+        return UART_TX_OK;
+    }
+
+    saved = lock();
+    tx_stats.start_fails++;
+    if (status == HAL_BUSY) tx_stats.start_busy++;
+    else tx_stats.start_errors++;
+    fail(status == HAL_BUSY ? UART_TX_RESULT_START_BUSY : UART_TX_RESULT_START_ERROR,
+         comm.tx.events.error_code | comm.uart->ErrorCode, HAL_GetTick());
+    (void)take_locked();
+    if (tx_hardware_stopped(comm.uart)) finish(UART_TX_IDLE, 0U);
+    unlock(saved);
+    if (comm.tx.phase == UART_TX_ABORTING) issue_abort();
+    return status == HAL_BUSY ? UART_TX_START_BUSY : UART_TX_START_ERROR;
+}
+
+UART_LOCAL void tx_service(void)
+{
+    tx_events_t pending = take_events();
+    uint32_t now, saved;
+    uint8_t abort_needed = 0U;
+    if (comm.uart == NULL) return;
+    if (comm.tx.phase == UART_TX_SENDING) {
+        now = HAL_GetTick();
+        saved = lock();
+        merge_events(&pending, take_locked());
+        if (pending.error) {
+            fail(UART_TX_RESULT_DMA_ERROR, pending.error_code, now);
+            abort_needed = 1U;
+        } else if (pending.done && tx_hardware_stopped(comm.uart)) {
+            comm.tx.result.code = UART_TX_RESULT_COMPLETE;
+            comm.tx.result.hal_error = HAL_UART_ERROR_NONE;
+            tx_stats.frames_sent++;
+            tx_stats.bytes_sent += comm.tx.length;
+            finish(UART_TX_IDLE, 0U);
+        } else {
+            if (pending.done) tx_stats.late_completions++;
+            if ((now - comm.tx.started_at) >= UART_TX_TIMEOUT_MS) {
+                fail(UART_TX_RESULT_TIMEOUT, HAL_UART_ERROR_NONE, now);
+                abort_needed = 1U;
+            }
+        }
+        unlock(saved);
+        if (abort_needed) issue_abort();
+        return;
+    }
+
+    if (pending.done) tx_stats.late_completions++;
+    if (comm.tx.phase != UART_TX_ABORTING) return;
+    now = HAL_GetTick();
+    saved = lock();
+    if (tx_hardware_stopped(comm.uart)) {
+        finish(UART_TX_IDLE, 0U);
+    } else if ((now - comm.tx.abort_at) >= UART_TX_ABORT_TIMEOUT_MS) {
+        /* Ortak USART register'larinda RX bitlerini koru. DMA EN zorlanmaz. */
+        CLEAR_BIT(comm.uart->Instance->CR3, USART_CR3_DMAT);
+        CLEAR_BIT(comm.uart->Instance->CR1, USART_CR1_TXEIE | USART_CR1_TCIE);
+        finish(UART_TX_FAULT, 1U);
+    }
+    unlock(saved);
+}
+
+UART_LOCAL tx_state_t tx_get_state(void) { return comm.tx.phase; }
+UART_LOCAL uint32_t tx_next_wait_ms(uint32_t now)
+{
+    if (comm.tx.events.done || comm.tx.events.error || comm.tx.events.aborted) return 0U;
+    if (comm.tx.phase == UART_TX_SENDING) return remaining(now, comm.tx.started_at + UART_TX_TIMEOUT_MS);
+    if (comm.tx.phase == UART_TX_ABORTING) {
+        uint32_t wait = remaining(now, comm.tx.abort_at + UART_TX_ABORT_TIMEOUT_MS);
+        return wait > 1U ? 1U : wait; /* Yalniz abort'ta kayip callback saglik kontrolu. */
+    }
+    return UINT32_MAX;
+}
+UART_LOCAL bool tx_take_result(tx_result_t *out)
+{
+    if (out == NULL || !comm.tx.result_ready) return false;
+    *out = comm.tx.result;
+    comm.tx.result_ready = 0U;
+    return true;
+}
+
+UART_LOCAL void tx_on_error(UART_HandleTypeDef *handle, uint32_t error)
+{
+    uint32_t saved;
+    if (handle == NULL || handle != comm.uart) return;
+    saved = lock();
+    tx_stats.tx_error_events++;
+    if (comm.tx.active_attempt) {
+        comm.tx.events.error_code |= error;
+        comm.tx.events.error = 1U;
+    }
+    unlock(saved);
+}
+UART_LOCAL void tx_on_abort_complete(UART_HandleTypeDef *handle)
+{
+    uint32_t saved;
+    if (handle == NULL || handle != comm.uart) return;
+    saved = lock();
+    tx_stats.abort_complete_events++;
+    comm.tx.events.aborted = 1U;
+    unlock(saved);
+    COMM_NOTIFY();
+}
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *handle)
+{
+    uint32_t saved;
+    if (handle == NULL || handle != comm.uart) return;
+#ifdef UART_COMM_TEST
+    if (test_drop_done) return;
+#endif
+    saved = lock();
+    tx_stats.tx_complete_events++;
+    comm.tx.events.done = 1U;
+    unlock(saved);
+    COMM_NOTIFY();
+}
+void HAL_UART_AbortTransmitCpltCallback(UART_HandleTypeDef *handle)
+{
+#ifdef UART_COMM_TEST
+    if (test_drop_abort) return;
+#endif
+    tx_on_abort_complete(handle);
+}
+
+#ifdef COMM_RTOS
+/* ==================== FIFO / owner / public API ==================== */
+static void comm_notify(void)
+{
+    BaseType_t woken = pdFALSE;
+    /* Scheduler suspend iken ISR bildirimi kernel'in pending-ready listesine
+     * gider. Son RX IDLE olayini burada dusurmek suresiz uykuda birakabilir. */
+    if (comm.task == NULL || xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED) return;
+    if (__get_IPSR() != 0U) {
+        (void)xTaskNotifyFromISR(comm.task, 1U, eSetBits, &woken);
+        portYIELD_FROM_ISR(woken);
+    } else (void)xTaskNotify(comm.task, 1U, eSetBits);
+}
+
+static void close_gate(void)
+{
+    uint32_t saved = lock();
+    if (comm.accepting) { comm.accepting = false; comm.epoch++; }
+    unlock(saved);
+}
+
+static void deliver(uint32_t tag, uart_comm_tx_code_t code, uint32_t error, bool recovery_fault)
+{
+    uart_comm_tx_result_t out = {tag, code, error, recovery_fault};
+    if (code == UART_COMM_TX_COMPLETE) comm.counters.tx_completed++;
+    else if (code == UART_COMM_TX_CANCELLED_FAULT) comm.counters.tx_cancelled++;
+    else {
+        comm.counters.tx_failed++;
+        comm.counters.last_tx_failure = code;
+        comm.counters.has_tx_failure = true;
+    }
+    if (comm.handlers.on_tx_result != NULL) {
+#ifdef COMM_PROFILE
+        cycle_sample_t before = cycle_sample();
+#endif
+        comm.handlers.on_tx_result(&out, comm.handlers.user);
+#ifdef COMM_PROFILE
+        uint32_t elapsed = cycle_elapsed(before);
+        if (elapsed > profile.max_result_handler_cycles) profile.max_result_handler_cycles = elapsed;
+#endif
+    }
+}
+
+static void publish(void)
+{
+    uart_comm_snapshot_t out;
+    uint32_t depth = uxQueueMessagesWaiting(comm.queue), saved;
+    saved = lock();
+    out = comm.counters;
+    unlock(saved);
+    /* Owner'in alanlarini IRQ kapatmadan hazirla. Ureticinin degistirdigi
+     * kabul/doluluk sayaclari yukaridaki tek kopyada korundu. */
+    out.initialized = comm.initialized;
+    out.rx_phase = comm.rx.phase;
+    out.tx_state = comm.tx.phase;
+    out.tx_accepting = comm.accepting;
+    out.tx_queue_depth = depth;
+    if (depth > out.tx_queue_high_water) comm.counters.tx_queue_high_water = out.tx_queue_high_water = depth;
+    out.rx_bytes_consumed = rx_stats.bytes_consumed;
+    out.rx_overruns = rx_stats.overruns;
+    out.rx_discarded_bytes = rx_stats.discarded_bytes;
+    out.rx_frame_timeouts = rx_stats.frame_timeouts;
+    out.rx_start_fails = rx_stats.start_fails;
+    out.rx_restarts = rx_stats.restarts;
+    out.rx_recovery_fails = rx_stats.recovery_fails;
+    out.rx_snapshot_defers = rx_stats.sample_defers;
+    out.rx_late_events = rx_stats.late_events;
+    out.last_tx_error = tx_stats.last_hal_error;
+    out.tx_start_busy = tx_stats.start_busy;
+    out.tx_start_errors = tx_stats.start_errors;
+    out.tx_dma_errors = tx_stats.transfer_errors;
+    out.tx_timeouts = tx_stats.transfer_timeouts;
+    out.tx_recovery_fails = tx_stats.recovery_fails;
+    out.tx_late_events = tx_stats.late_completions;
+    saved = lock();
+    out.rx_ready = comm.rx.phase == UART_RX_PHASE_RUNNING && hardware_healthy();
+    out.rx_quiescent = hardware_stopped() != 0U;
+    out.last_rx_error = rx_stats.last_error;
+    comm.published = out;
+    unlock(saved);
+}
+
+static void comm_deliver_frame(const frame_info_t *info, void *user)
+{
+    (void)user;
+    if (comm.handlers.on_frame != NULL) {
+#ifdef COMM_PROFILE
+        cycle_sample_t before = cycle_sample();
+#endif
+        comm.handlers.on_frame(info, comm.handlers.user);
+#ifdef COMM_PROFILE
+        uint32_t elapsed = cycle_elapsed(before);
+        if (elapsed > profile.max_frame_handler_cycles) profile.max_frame_handler_cycles = elapsed;
+#endif
+    }
+}
+static void comm_start_owner(void)
+{
+    rx_set_handler(comm_deliver_frame, NULL);
+    (void)rx_start(comm.uart); /* HAL_ERROR owner'in sinirli recovery akisina gider. */
+    publish();
+}
+
+static void comm_service_once(void)
+{
+    tx_result_t out;
+    tx_item_t item;
+    uint32_t saved, recovery;
+    tx_status_t status;
+#ifdef COMM_PROFILE
+    cycle_sample_t before = cycle_sample();
+#endif
+    rx_service();
+    tx_service();
+#ifdef UART_COMM_TEST
+    if (comm.test_fault && comm.tx.phase == UART_TX_IDLE) {
+        comm.test_fault = 0U;
+        comm.tx.phase = UART_TX_FAULT;
+    }
+#endif
+    if (comm.tx.phase == UART_TX_FAULT) close_gate();
+    if (tx_take_result(&out) && comm.active_valid) {
+        uint32_t tag = comm.active.tag;
+        comm.active_valid = false; /* Callback yeniden enqueue yapabilir. */
+        deliver(tag, (uart_comm_tx_code_t)out.code, out.hal_error, out.recovery_fault);
+    }
+    saved = lock();
+    recovery = comm.recovery_requests;
+    comm.recovery_requests = 0U;
+    unlock(saved);
+    if ((recovery & UART_COMM_RECOVER_RX) && comm.rx.phase == UART_RX_PHASE_FAULT)
+        (void)rx_request_recovery();
+    if ((recovery & UART_COMM_RECOVER_TX) && comm.tx.phase == UART_TX_FAULT) {
+        if (uxQueueMessagesWaiting(comm.queue) != 0U) {
+            saved = lock();
+            comm.recovery_requests |= UART_COMM_RECOVER_TX;
+            unlock(saved);
+        } else if (!comm.active_valid && tx_init(comm.uart) == HAL_OK) {
+            saved = lock(); comm.accepting = true; unlock(saved);
+        }
+    }
+    /* FAULT bosaltmasi dahil en fazla bir queue ogesi; RX her tur servis alir.
+     * SENDING/ABORTING backlog'u dequeue edilmez ve spin sebebi olmaz. */
+    if ((!comm.active_valid && comm.tx.phase == UART_TX_IDLE) || comm.tx.phase == UART_TX_FAULT) {
+        if (xQueueReceive(comm.queue, &item, 0U) == pdPASS) {
+            if (comm.tx.phase == UART_TX_FAULT || item.admission_epoch != comm.epoch) {
+                deliver(item.tag, UART_COMM_TX_CANCELLED_FAULT, 0U, false);
+            } else {
+                comm.active = item;
+                comm.active_valid = true;
+                status = tx_send_copy(item.bytes, item.len);
+                if (status == UART_TX_INVALID || status == UART_TX_BUSY || status == UART_TX_NOT_READY) {
+                    comm.tx.phase = UART_TX_FAULT;
+                    close_gate();
+                    comm.active_valid = false;
+                    deliver(item.tag, UART_COMM_TX_START_ERROR, 0U, true);
+                }
+            }
+        }
+    }
+    publish();
+#ifdef COMM_PROFILE
+    {
+        uint32_t elapsed = cycle_elapsed(before);
+        profile.task_cycles += elapsed;
+        profile.iterations++;
+        if (elapsed > profile.max_service_cycles) profile.max_service_cycles = elapsed;
+    }
+#endif
+}
+
+static uint32_t comm_next_wait(void)
+{
+    uint32_t now = HAL_GetTick(), rx_wait, tx_wait;
+    uint32_t saved = lock(), recovery = comm.recovery_requests;
+    unlock(saved);
+    /* FAULT kuyruğunun son iptalinden sonra ertelenmiş recovery hâlâ iştir;
+     * uyandıran notification daha önce tüketilmiş olabilir. */
+    if (recovery != 0U) return 0U;
+    if (comm.tx.result_ready ||
+        ((comm.tx.phase == UART_TX_IDLE || comm.tx.phase == UART_TX_FAULT) &&
+         uxQueueMessagesWaiting(comm.queue) != 0U)) return 0U;
+    rx_wait = rx_next_wait_ms(now);
+    tx_wait = tx_next_wait_ms(now);
+    return rx_wait < tx_wait ? rx_wait : tx_wait;
+}
+
+static TickType_t wait_ticks(uint32_t ms)
+{
+    uint64_t ticks;
+    if (ms == UINT32_MAX) return portMAX_DELAY;
+    ticks = ((uint64_t)ms * configTICK_RATE_HZ + 999U) / 1000U;
+    return ticks >= portMAX_DELAY ? portMAX_DELAY - 1U : (TickType_t)ticks;
+}
+
+static void UartCommTask(void *argument)
+{
+    uint32_t events, wait;
+    (void)argument;
+    comm_start_owner();
+    for (;;) {
+        comm_service_once();
+        wait = comm_next_wait(); /* Handler sonrasi guncel zaman. */
+        if (wait == 0U) continue;
+#ifdef COMM_PROFILE
+        if (wait == UINT32_MAX) profile.infinite_waits++;
+        else profile.finite_waits++;
+#endif
+        /* Giriste notification temizlenmez: uyku oncesi gelen olay korunur.
+         * Bildirim yalniz uyandirir; ham olaylar ikinci kez enjekte edilmez. */
+        (void)xTaskNotifyWait(0U, UINT32_MAX, &events, wait_ticks(wait));
+    }
+}
+
+HAL_StatusTypeDef uart_comm_init(UART_HandleTypeDef *uart, const uart_comm_handlers_t *handlers)
+{
+    if (comm.initialized) return HAL_BUSY;
+    if (__get_IPSR() || uart == NULL || handlers == NULL || uart->Instance == NULL ||
+        uart->hdmarx == NULL || uart->hdmatx == NULL ||
+        uart->hdmarx->Instance == NULL || uart->hdmatx->Instance == NULL ||
+        uart->hdmarx->Instance == uart->hdmatx->Instance) return HAL_ERROR;
+    if (uart->hdmarx->Parent != uart || uart->hdmatx->Parent != uart ||
+        uart->hdmarx->Init.Direction != DMA_PERIPH_TO_MEMORY || uart->hdmarx->Init.Mode != DMA_CIRCULAR ||
+        uart->hdmatx->Init.Direction != DMA_MEMORY_TO_PERIPH || uart->hdmatx->Init.Mode != DMA_NORMAL) return HAL_ERROR;
+#ifndef UART_HAL_MODEL
+    /* Bu surumun IRQ ve DMA flag baglantilari tek USART2 icindir. */
+    if (uart->Instance != USART2 || uart->hdmarx->Instance != DMA1_Stream5 ||
+        uart->hdmatx->Instance != DMA1_Stream6 ||
+        uart->hdmarx->Init.Channel != DMA_CHANNEL_4 || uart->hdmatx->Init.Channel != DMA_CHANNEL_4) return HAL_ERROR;
+#endif
+    if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED) return HAL_BUSY;
+    if (hardware_active(uart) || tx_init(uart) != HAL_OK) return HAL_ERROR;
+    comm.uart = uart;
+    comm.handlers = *handlers;
+    comm.queue = xQueueCreateStatic(COMM_QUEUE_SIZE, sizeof(tx_item_t), queue_storage, &queue_cb);
+    if (comm.queue == NULL) return HAL_ERROR;
+    comm.task = xTaskCreateStatic(UartCommTask, "UartCommTask", COMM_STACK_SIZE, NULL,
+                                COMM_TASK_PRIORITY, owner_stack, &owner_tcb);
+    if (comm.task == NULL) return HAL_ERROR;
+#ifdef COMM_PROFILE
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0U;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    memset((void *)&profile, 0, sizeof(profile));
+    rx_latency_pending = 0U;
+#endif
+    comm.initialized = comm.accepting = true;
+    publish();
+    return HAL_OK;
+}
+
+uart_comm_send_status_t uart_comm_send_copy(const uint8_t *data, uint16_t len, uint32_t tag)
+{
+    tx_item_t item;
+    uint32_t saved, epoch;
+    bool accepting;
+    if (__get_IPSR() || data == NULL || len == 0U || len > FRAME_MAX_SIZE) return UART_COMM_INVALID;
+    if (!comm.initialized || xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) return UART_COMM_NOT_READY;
+    saved = lock(); accepting = comm.accepting; epoch = comm.epoch; unlock(saved);
+    if (!accepting) return UART_COMM_NOT_READY;
+    memset(&item, 0, sizeof(item));
+    item.tag = tag; item.admission_epoch = epoch; item.len = len;
+    memcpy(item.bytes, data, len);
+    if (xQueueSendToBack(comm.queue, &item, 0U) != pdPASS) {
+        saved = lock(); comm.counters.tx_queue_full++; unlock(saved);
+        comm_notify(); /* Yeni sayac snapshot'i da owner'da yayimlanir. */
+        return UART_COMM_QUEUE_FULL;
+    }
+    saved = lock(); comm.counters.tx_accepted++; unlock(saved);
+    comm_notify();
+    return UART_COMM_ACCEPTED;
+}
+
+bool uart_comm_request_recovery(uint32_t directions)
+{
+    uint32_t saved;
+    if (__get_IPSR() || !comm.initialized || directions == 0U ||
+        (directions & ~(UART_COMM_RECOVER_RX | UART_COMM_RECOVER_TX)) != 0U) return false;
+    saved = lock(); comm.recovery_requests |= directions; unlock(saved);
+    comm_notify();
+    return true;
+}
+
+bool uart_comm_get_snapshot(uart_comm_snapshot_t *out)
+{
+    uint32_t saved;
+    if (out == NULL) return false;
+    saved = lock(); *out = comm.published; unlock(saved);
+    return true;
+}
+
+#ifdef UART_COMM_TEST
+void comm_test_start_owner(void) { comm_start_owner(); }
+void comm_test_service_once(void) { comm_service_once(); }
+uint32_t comm_test_next_wait(void) { return comm_next_wait(); }
+void comm_test_force_fault(void) { comm.test_fault = 1U; comm_notify(); }
+void comm_test_stop_before_scheduler(void)
+{
+    uint32_t start = HAL_GetTick();
+    configASSERT(xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED);
+    rx_force_restart_fail(1U);
+    rx_test_inject_error();
+    while ((HAL_GetTick() - start) < 100U) { rx_service(); tx_service(); }
+    rx_force_restart_fail(0U);
+}
+#ifdef COMM_PROFILE
+void comm_test_get_profile(comm_test_profile_t *out)
+{
+    uint32_t free_words = uxTaskGetStackHighWaterMark(comm.task), saved = lock();
+    profile.stack_free_words = free_words;
+    *out = profile;
+    unlock(saved);
+}
+void comm_test_irq_enter(void) { irq_started = cycles(); }
+void comm_test_irq_exit(void)
+{
+    uint32_t elapsed = cycles() - irq_started;
+    profile.irq_cycles += elapsed;
+    if (elapsed > profile.max_irq_cycles) profile.max_irq_cycles = elapsed;
+}
+void comm_test_pause_owner(uint8_t pause)
+{
+    if (pause) vTaskSuspend(comm.task);
+    else vTaskResume(comm.task);
+}
+#endif
+#endif
+#endif /* COMM_RTOS */

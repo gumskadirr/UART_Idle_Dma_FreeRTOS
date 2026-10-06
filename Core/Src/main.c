@@ -18,14 +18,18 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "uart_rx.h"
-#include "uart_tx.h"
+#include "uart_comm.h"
+#include "app_protocol.h"
+#ifdef UART_COMM_TEST
+#include "uart_comm_test.h"
 #include "tests.h"
 #include "uart_comm_tests.h"
-#include "app_protocol.h"
+#include "uart_rtos_tests.h"
+#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,8 +52,19 @@ UART_HandleTypeDef huart2;
 DMA_HandleTypeDef hdma_usart2_rx;
 DMA_HandleTypeDef hdma_usart2_tx;
 
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* USER CODE BEGIN PV */
-
+uart_comm_tx_result_t uart_last_tx_result;
+uint32_t uart_tx_result_count;
+#ifdef UART_COMM_TEST
+HAL_StatusTypeDef rx_start_status;
+#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -57,13 +72,24 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
+void StartDefaultTask(void *argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+#ifndef UART_COMM_TEST
+/* Iki handler da UART taskinda calisir: kisa tut, bekleme yapma. */
+static void on_tx_result(const uart_comm_tx_result_t *result, void *user)
+{
+    (void)user;
+    uart_last_tx_result = *result;
+    uart_tx_result_count++;
+}
+static const uart_comm_handlers_t uart_handlers = {app_protocol_on_frame, on_tx_result, NULL};
+#endif
 /* USER CODE END 0 */
 
 /**
@@ -98,36 +124,61 @@ int main(void)
   MX_DMA_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-#ifdef UART_COMM_TEST
-  /* Donanim gerektirmeyen 29 birim testi (TEST_BEKLENEN_ADET). */
+#if defined(UART_COMM_TEST) && !defined(UART_COMM_SERIAL_TEST)
+  /* Eski cekirdek regresyonu scheduler oncesi; uretimde bu kapilar yok. */
   birim_testleri_kosur();
-#endif
-
-  /* Teslim hedefi start'tan ONCE kaydedilir (R5): tasima katmani
-     protokolu yorumlamaz, cozulmus cerceveyi uygulama handler'ina verir. */
   app_protocol_init();
-  uart_rx_set_handler(app_protocol_on_frame, NULL);
-
-  /* Alimi baslat: okuma konumu sifirlanir, circular DMA IDLE olaylariyla
-     kurulur. Loopback gonderiminden ONCE olmali. */
-  if (uart_rx_start(&huart2) != HAL_OK) {
-    Error_Handler();
-  }
-
-  if ((uart_tx_init(&huart2)) != HAL_OK){
-      Error_Handler();
-    }
-#ifdef UART_COMM_TEST
-  /* PA2-PA3 jumper gerektirir. Uretim derlemesinde HIC derlenmez. */
+  rx_set_handler(app_protocol_on_frame, NULL);
+  rx_start_status = rx_start(&huart2);
+  if (tx_init(&huart2) != HAL_OK) Error_Handler();
   loopback_testi_kosur(&huart2);
-
-  /* Adim bazli kosucu (P0..M2). Sonuclar debugger'da:
-       uart_comm_test_sayisi / _gecen / _kalan / _kosmayan / _atlanan
-       uart_comm_test_kayit[i].id ve .result
-     Kabul olcutu TEK ifade: uart_comm_tests_ok() == 1 */
   uart_comm_tests_run(&huart2);
+  comm_test_stop_before_scheduler();
 #endif
-  /* USER CODE END 2 */
+  app_protocol_init();
+/* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+#ifdef UART_COMM_SERIAL_TEST
+  if (uart_comm_init(&huart2, &uart_serial_test_handlers) != HAL_OK) Error_Handler();
+#elif defined(UART_COMM_TEST)
+  if (uart_comm_init(&huart2, &uart_rtos_test_handlers) != HAL_OK) Error_Handler();
+#else
+  if (uart_comm_init(&huart2, &uart_handlers) != HAL_OK) Error_Handler();
+#endif
+/* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -135,11 +186,10 @@ int main(void)
   {
     /* USER CODE END WHILE */
 
-    /* USER CODE BEGIN 3 */
-    uart_rx_service();
-    uart_tx_service();
+  /* USER CODE BEGIN 3 */
+  Error_Handler();
   }
-  /* USER CODE END 3 */
+/* USER CODE END 3 */
 }
 
 /**
@@ -231,10 +281,10 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Stream5_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
   /* DMA1_Stream6_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
 
 }
@@ -262,6 +312,49 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  (void)argument;
+#ifdef UART_COMM_SERIAL_TEST
+  uart_serial_tests_start();
+#elif defined(UART_COMM_TEST)
+  uart_rtos_tests_start();
+#endif
+  /* Uygulama buraya kendi isini ekleyebilir. Bos task periyodik uyanmaz. */
+  for (;;) vTaskSuspend(NULL);
+/* USER CODE END 5 */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

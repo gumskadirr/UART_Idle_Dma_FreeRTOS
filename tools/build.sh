@@ -3,6 +3,7 @@
 #
 #   tools/build.sh            URETIM derlemesi (UART_COMM_TEST KAPALI)
 #   tools/build.sh test       TEST derlemesi   (-DUART_COMM_TEST)
+#   tools/build.sh serial     CH340 test derlemesi (loopback jumper YOK)
 #   tools/build.sh clean      ayni, ama once butun ara dosyalari siler
 #
 # NEDEN AYRI DIZIN: Debug/ dizinini STM32CubeIDE uretir ve proje her
@@ -26,6 +27,7 @@ MODE="uretim"
 CLEAN=0
 for a in "$@"; do
   [ "$a" = "test" ]  && MODE="test"
+  [ "$a" = "serial" ] && MODE="serial"
   [ "$a" = "clean" ] && CLEAN=1
 done
 
@@ -33,7 +35,6 @@ if [ ! -f "$SRC/makefile" ]; then
   echo "HATA: $SRC/makefile yok. CubeIDE'de projeyi bir kez derleyin." >&2
   exit 1
 fi
-
 [ "$CLEAN" = "1" ] && rm -rf "$OUT"
 mkdir -p "$OUT"
 
@@ -49,11 +50,16 @@ else
   find "$OUT" -name '*.mk' -exec \
     sed -i 's/-DSTM32F407xx\( -DUART_COMM_TEST\)\?/-DSTM32F407xx -DUART_COMM_TEST/g' {} +
 fi
+if [ "$MODE" = "serial" ]; then
+  find "$OUT" -name '*.mk' -exec sed -i 's/ -DUART_COMM_TEST/ -DUART_COMM_TEST -DUART_COMM_SERIAL_TEST/g' {} +
+fi
 
 # Kaynaklar ../ ile gosterildigi icin derleme dizini proje koku altinda ve
 # ayni derinlikte olmali; .build tam olarak oyle.
 cd "$OUT" || exit 1
-make -j8 all >build.log 2>&1
+# Kip degisince CFLAGS tek basina make bagimliligi degildir. Tam yeniden
+# derleme, test nesnelerinin uretim ELF'ine sizmasini da engeller.
+make -B -j8 all >build.log 2>&1
 rc=$?
 
 echo "--- uyari/hata ---"
